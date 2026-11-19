@@ -1,0 +1,22 @@
+# SearXNG 部署（MolBase 网络搜索兜底后端）
+# 用法：在 Linux 虚拟机（有 Docker）上执行
+#   cd deploy/searxng && docker compose up -d
+# 启动后：http://<虚拟机IP>:8888/search?q=test&format=json 应返回 JSON。
+services:
+  searxng:
+    image: searxng/searxng:latest
+    container_name: searxng
+    restart: unless-stopped
+    ports:
+      - "8888:8080"          # 宿主机 8888 -> 容器 8080
+    volumes:
+      - ./settings.yml:/etc/searxng/settings.yml:ro
+    environment:
+      - SEARXNG_BASE_URL=http://<虚拟机IP>:8888/  # TODO: 改成宿主机可访问的 IP
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+      - DAC_OVERRIDE

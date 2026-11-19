@@ -1,0 +1,25 @@
+# MolBase 服务部署（Linux 虚拟机 / 服务器）
+# 用法：在项目根目录 molbase/ 下执行
+#   docker compose -f deploy/molbase/docker-compose.yml up -d --build
+services:
+  molbase:
+    build:
+      context: ../..
+      dockerfile: deploy/molbase/Dockerfile
+    container_name: molbase
+    restart: unless-stopped
+    ports:
+      - "8787:8787"          # 宿主机 8787 -> 容器 8787
+    volumes:
+      - molbase-data:/app/data   # SQLite 数据持久化（不随容器重建丢失）
+    environment:
+      - MOLBASE_SERVER_HOST=0.0.0.0
+      - MOLBASE_SERVER_PORT=8787
+      # 网络搜索兜底：指向同机部署的 SearXNG（见 deploy/searxng/）
+      - MOLBASE_WEB_SEARCH_ENABLED=true
+      - MOLBASE_WEB_SEARCH_ENDPOINT=http://<虚拟机IP>:8888  # TODO: 改成 SearXNG 所在主机 IP
+      # 可选鉴权（公网部署务必设置）
+      # - MOLBASE_SERVER_AUTH_TOKEN=your-secret-token
+
+volumes:
+  molbase-data:

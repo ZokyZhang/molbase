@@ -1,0 +1,10 @@
+# MolBase（Local Orchestration Of Memory）依赖
+#
+# 核心（离线无大模型版）：零第三方依赖，仅需 Python 3.10+ 标准库。
+#   - 存储底座：sqlite3（标准库）
+#   - 代码代工：ast（标准库）
+#   - 关联图/PageRank：纯 Python 实现
+#   - BM25/哈希向量：纯 Python 实现
+#
+# 可选（接本地大模型版）：以下依赖按需安装，缺失时自动降级回零模型版本。
+#   sentence-transformers>=2.7.0   # 本地 embedding 模型（可选增强）

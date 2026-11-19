@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MolBase · Token 优化实时监控</title>
+<style>
+  :root {
+    --bg: #f4f6fb; --card: #ffffff; --ink: #1a1d24; --muted: #6b7280;
+    --brand: #2563eb; --save: #16a34a; --base: #94a3b8; --line: #e5e7eb;
+    --model: #7c3aed; --proxy: #0891b2; --warn: #d97706;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--ink);
+    font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    font-size: 14px;
+  }
+  .topbar {
+    background: linear-gradient(135deg, #1e3a8a 0%, #2563eb 60%, #0891b2 100%);
+    color: #fff; padding: 18px 24px; display: flex; align-items: center;
+    justify-content: space-between; flex-wrap: wrap; gap: 12px;
+  }
+  .topbar h1 { font-size: 20px; font-weight: 700; letter-spacing: .5px; }
+  .topbar .sub { font-size: 12px; opacity: .85; margin-top: 2px; }
+  .badge {
+    display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px;
+    border-radius: 20px; font-size: 12px; font-weight: 600; background: rgba(255,255,255,.16);
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #4ade80; }
+  .dot.off { background: #f87171; }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 20px; }
+  .cards { display: grid; grid-template-columns: repeat(5, 1fr); gap: 14px; margin-bottom: 16px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 18px; }
+  .card .k { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+  .card .v { font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .card .v.green { color: var(--save); }
+  .card .v.blue { color: var(--brand); }
+  .card .v.purple { color: var(--model); }
+  .card .u { font-size: 11px; color: var(--muted); margin-top: 6px; }
+  .grid2 { display: grid; grid-template-columns: 1.7fr 1fr; gap: 14px; margin-bottom: 16px; }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 18px; }
+  h2 { font-size: 15px; margin-bottom: 14px; padding-left: 10px; border-left: 3px solid var(--brand); }
+  .legend { display: flex; gap: 16px; font-size: 12px; color: var(--muted); margin-bottom: 10px; flex-wrap: wrap; }
+  .legend span { display: inline-flex; align-items: center; gap: 5px; }
+  .sw { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+  .sw.blue { background: var(--brand); } .sw.base { background: var(--base); } .sw.save { background: var(--save); }
+  svg { width: 100%; height: auto; display: block; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 600; background: #fafbfc; font-size: 12px; }
+  tr:last-child td { border-bottom: none; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .tag { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11px; }
+  .tag.knowledge { background: #e0f2fe; color: #0369a1; }
+  .tag.code { background: #f3e8ff; color: var(--model); }
+  .tag.skill { background: #ecfeff; color: var(--proxy); }
+  .stat-list { list-style: none; }
+  .stat-list li { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid var(--line); }
+  .stat-list li:last-child { border-bottom: none; }
+  .stat-list .label { color: var(--muted); }
+  .stat-list .val { font-weight: 700; font-variant-numeric: tabular-nums; }
+  .empty { color: var(--muted); text-align: center; padding: 30px 0; }
+  .foot { color: var(--muted); font-size: 12px; text-align: center; padding: 8px 0 24px; }
+  @media (max-width: 900px) { .cards { grid-template-columns: repeat(2, 1fr); } .grid2 { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div class="topbar">
+  <div>
+    <h1>MolBase · Token 优化实时监控</h1>
+    <div class="sub">知识库本体（表） + 代工中间层（存储过程） + 监控大屏（配套服务） · 数据源自知识库 /metrics · /stats</div>
+  </div>
+  <div class="badge" id="status-badge"><span class="dot" id="status-dot"></span><span id="status-text">连接中…</span></div>
+</div>
+
+<div class="wrap">
+  <!-- 核心指标卡 -->
+  <div class="cards">
+    <div class="card"><div class="k">累计查询（持久化）</div><div class="v blue" id="m-queries">-</div><div class="u">baseline&gt;0 的埋点记录</div></div>
+    <div class="card"><div class="k">累计节省 token</div><div class="v green" id="m-saved">-</div><div class="u">基线 − 实际返回</div></div>
+    <div class="card"><div class="k">节省比例</div><div class="v green" id="m-ratio">-</div><div class="u">越用越省的整体效果</div></div>
+    <div class="card"><div class="k">等效节省成本</div><div class="v purple" id="m-cost">-</div><div class="u">若上云 API 折算（¥）</div></div>
+    <div class="card"><div class="k">平均置信度</div><div class="v blue" id="m-conf">-</div><div class="u">检索质量底线</div></div>
+  </div>
+
+  <!-- 趋势图 + 右侧统计 -->
+  <div class="grid2">
+    <section>
+      <h2>Token 消耗趋势（最近 N 次查询）</h2>
+      <div class="legend">
+        <span><i class="sw base"></i>无代工层基线（模型自读全表）</span>
+        <span><i class="sw blue"></i>有代工层实际返回</span>
+        <span>两线之间阴影 = 节省差额</span>
+      </div>
+      <div id="chart"></div>
+    </section>
+    <section>
+      <h2>知识库本体统计</h2>
+      <ul class="stat-list" id="stat-list">
+        <li><span class="label">知识条目</span><span class="val">-</span></li>
+        <li><span class="label">代码符号</span><span class="val">-</span></li>
+        <li><span class="label">技能包</span><span class="val">-</span></li>
+        <li><span class="label">关联图节点</span><span class="val">-</span></li>
+      </ul>
+      <h2 style="margin-top:16px;">会话实时台账（本进程）</h2>
+      <ul class="stat-list" id="ledger-list">
+        <li><span class="label">会话查询数</span><span class="val">-</span></li>
+        <li><span class="label">会话节省 token</span><span class="val">-</span></li>
+      </ul>
+      <h2 style="margin-top:16px;">操作模式收敛（自进化）</h2>
+      <ul class="stat-list" id="tooltrace-list">
+        <li><span class="label">工具轨迹总数</span><span class="val">-</span></li>
+        <li><span class="label">不同操作指纹</span><span class="val">-</span></li>
+        <li><span class="label">已自动生成 skill</span><span class="val">-</span></li>
+      </ul>
+    </section>
+  </div>
+
+  <!-- 高频操作指纹 -->
+  <section>
+    <h2>高频操作指纹（重复操作 · 达标自动固化为 skill）</h2>
+    <table>
+      <thead><tr>
+        <th>操作指纹（工具名 + 参数键）</th><th class="num">出现次数</th><th>来源意图</th>
+      </tr></thead>
+      <tbody id="fingerprint-body"><tr><td colspan="3" class="empty">暂无数据，喂入一次 /tooltrace 后这里会出现重复操作模式</td></tr></tbody>
+    </table>
+  </section>
+
+  <!-- 明细表 -->
+  <section>
+    <h2>最近查询明细（埋点流水）</h2>
+    <table>
+      <thead><tr>
+        <th>时间</th><th>查询</th><th>路由</th><th class="num">命中</th>
+        <th class="num">实际 token</th><th class="num">基线 token</th><th class="num">节省 token</th>
+      </tr></thead>
+      <tbody id="detail-body"><tr><td colspan="7" class="empty">暂无数据</td></tr></tbody>
+    </table>
+  </section>
+
+  <div class="foot">数据每 3 秒自动刷新 · token 为粗估值（中文 1 字≈1 token，英文 4 字符≈1 token）· 成本按输入 ¥2.0/1M、输出 ¥8.0/1M 等效折算</div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  var REFRESH_MS = 3000;
+  var CHART_W = 720, CHART_H = 240, PAD_L = 56, PAD_R = 16, PAD_T = 16, PAD_B = 30;
+
+  var SVG_NS = "http://www.w3.org/2000/svg";
+  var SVG_TAGS = { svg:1, g:1, line:1, path:1, circle:1, text:1, rect:1, polyline:1 };
+
+  // 创建元素：SVG 标签用 createElementNS（否则折线图不渲染）；
+  // child 为 DOM 节点时 appendChild，为字符串/数字时写 textContent。
+  function el(tag, attrs, child) {
+    var n = SVG_TAGS[tag]
+      ? document.createElementNS(SVG_NS, tag)
+      : document.createElement(tag);
+    if (attrs) for (var k in attrs) n.setAttribute(k, attrs[k]);
+    if (child != null) {
+      if (typeof child === "string" || typeof child === "number") {
+        n.textContent = String(child);
+      } else if (child && child.nodeType) {
+        n.appendChild(child);
+      }
+    }
+    return n;
+  }
+
+  // ---- 格式化 ----
+  function fmt(n) { return (n == null) ? "-" : Number(n).toLocaleString("en-US"); }
+  function pct(x) { return (x == null) ? "-" : (x * 100).toFixed(1) + "%"; }
+  function costOf(tokens) { return "¥" + (tokens / 1000000 * 2.0).toFixed(4); }
+  function tsTime(ts) {
+    var d = new Date(ts * 1000);
+    function p(n) { return (n < 10 ? "0" : "") + n; }
+    return p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds());
+  }
+
+  // ---- SVG 折线图 ----
+  function renderChart(recent) {
+    var host = document.getElementById("chart");
+    host.innerHTML = "";
+    // recent 为倒序（最新在前），翻转为时间正序（旧→新）
+    var rows = recent.slice().reverse();
+    if (!rows.length) {
+      host.appendChild(el("div", { "class": "empty" }, "暂无埋点数据，发起一次 /query 后这里会出现趋势"));
+      return;
+    }
+    var maxTok = 1;
+    rows.forEach(function (r) { maxTok = Math.max(maxTok, r.baseline_tokens || 0); });
+
+    var svg = el("svg", { viewBox: "0 0 " + CHART_W + " " + CHART_H, preserveAspectRatio: "xMidYMid meet" });
+    var g = el("g");
+
+    // 网格 + Y 轴刻度
+    var gridLines = 4;
+    for (var i = 0; i <= gridLines; i++) {
+      var y = PAD_T + (CHART_H - PAD_T - PAD_B) * i / gridLines;
+      var val = Math.round(maxTok * (1 - i / gridLines));
+      g.appendChild(el("line", { x1: PAD_L, y1: y, x2: CHART_W - PAD_R, y2: y, stroke: "#eef1f6", "stroke-width": 1 }));
+      g.appendChild(el("text", { x: PAD_L - 8, y: y + 4, "text-anchor": "end", fill: "#9aa1ad", "font-size": 10 }, fmt(val)));
+    }
+
+    var n = rows.length;
+    var plotW = CHART_W - PAD_L - PAD_R, plotH = CHART_H - PAD_T - PAD_B;
+    function px(i) { return PAD_L + (n === 1 ? plotW / 2 : plotW * i / (n - 1)); }
+    function py(v) { return PAD_T + plotH * (1 - v / maxTok); }
+
+    // 面积：基线（灰）
+    var areaD = "M" + px(0) + "," + py(rows[0].baseline_tokens);
+    for (var i = 1; i < n; i++) areaD += " L" + px(i) + "," + py(rows[i].baseline_tokens);
+    areaD += " L" + px(n - 1) + "," + (PAD_T + plotH) + " L" + px(0) + "," + (PAD_T + plotH) + " Z";
+    g.appendChild(el("path", { d: areaD, fill: "#94a3b8", opacity: 0.18 }));
+
+    // 面积：实际（蓝）
+    var areaA = "M" + px(0) + "," + py(rows[0].actual_tokens);
+    for (var j = 1; j < n; j++) areaA += " L" + px(j) + "," + py(rows[j].actual_tokens);
+    areaA += " L" + px(n - 1) + "," + (PAD_T + plotH) + " L" + px(0) + "," + (PAD_T + plotH) + " Z";
+    g.appendChild(el("path", { d: areaA, fill: "#2563eb", opacity: 0.15 }));
+
+    // 折线：基线
+    var lineD = "M" + px(0) + "," + py(rows[0].baseline_tokens);
+    for (var k = 1; k < n; k++) lineD += " L" + px(k) + "," + py(rows[k].baseline_tokens);
+    g.appendChild(el("path", { d: lineD, fill: "none", stroke: "#94a3b8", "stroke-width": 2, "stroke-dasharray": "5 4" }));
+
+    // 折线：实际
+    var lineA = "M" + px(0) + "," + py(rows[0].actual_tokens);
+    for (var m = 1; m < n; m++) lineA += " L" + px(m) + "," + py(rows[m].actual_tokens);
+    g.appendChild(el("path", { d: lineA, fill: "none", stroke: "#2563eb", "stroke-width": 2.5 }));
+
+    // 数据点（实际）
+    rows.forEach(function (r, i) {
+      g.appendChild(el("circle", { cx: px(i), cy: py(r.actual_tokens), r: 3.5, fill: "#2563eb" }));
+    });
+
+    // X 轴标签（时间）
+    var step = Math.max(1, Math.floor(n / 8));
+    rows.forEach(function (r, i) {
+      if (i % step === 0 || i === n - 1) {
+        g.appendChild(el("text", { x: px(i), y: CHART_H - 8, "text-anchor": "middle", fill: "#9aa1ad", "font-size": 10 }, tsTime(r.ts)));
+      }
+    });
+
+    svg.appendChild(g);
+    host.appendChild(svg);
+  }
+
+  // ---- 数据拉取与渲染 ----
+  function refresh() {
+    var ok = false;
+    fetch("/metrics").then(function (r) { return r.json(); }).then(function (d) {
+      ok = true;
+      var agg = d.aggregate || {};
+      document.getElementById("m-queries").textContent = fmt(agg.queries);
+      document.getElementById("m-saved").textContent = fmt(agg.saved_tokens);
+      document.getElementById("m-ratio").textContent = agg.saved_ratio_pct || "-";
+      document.getElementById("m-cost").textContent = costOf(agg.saved_tokens || 0);
+      document.getElementById("m-conf").textContent = (agg.confidence_avg != null) ? Number(agg.confidence_avg).toFixed(2) : "-";
+
+      renderChart(d.recent || []);
+
+      var led = d.ledger || {};
+      var ll = document.getElementById("ledger-list").children;
+      if (ll.length >= 2) {
+        ll[0].querySelector(".val").textContent = fmt(led.queries);
+        ll[1].querySelector(".val").textContent = fmt(led.saved_tokens);
+      }
+
+      // 操作模式收敛（自进化）
+      var tt = d.tooltraces || {};
+      var tl = document.getElementById("tooltrace-list").children;
+      var tkeys = [tt.traces, tt.fingerprints, tt.auto_skill_count];
+      tkeys.forEach(function (v, i) { if (tl[i]) tl[i].querySelector(".val").textContent = fmt(v); });
+      var fb = document.getElementById("fingerprint-body");
+      fb.innerHTML = "";
+      var top = tt.top || [];
+      if (!top.length) {
+        fb.appendChild(el("tr", {}, el("td", { colspan: 3, "class": "empty" }, "暂无数据，喂入一次 /tooltrace 后这里会出现重复操作模式")));
+      } else {
+        top.forEach(function (f) {
+          var tr = el("tr");
+          tr.appendChild(el("td", {}, f.fingerprint || ""));
+          tr.appendChild(el("td", { "class": "num" }, fmt(f.count)));
+          tr.appendChild(el("td", {}, f.intent || ""));
+          fb.appendChild(tr);
+        });
+      }
+
+      // 明细表
+      var body = document.getElementById("detail-body");
+      body.innerHTML = "";
+      var recent = d.recent || [];
+      if (!recent.length) {
+        body.appendChild(el("tr", {}, el("td", { colspan: 7, "class": "empty" }, "暂无数据")));
+        return;
+      }
+      recent.slice(0, 20).forEach(function (r) {
+        var saved = (r.baseline_tokens || 0) - (r.actual_tokens || 0);
+        var tr = el("tr");
+        tr.appendChild(el("td", {}, tsTime(r.ts)));
+        tr.appendChild(el("td", {}, r.query || ""));
+        tr.appendChild(el("td", {}, el("span", { "class": "tag " + (r.route || "knowledge") }, r.route || "knowledge")));
+        tr.appendChild(el("td", { "class": "num" }, fmt(r.hits)));
+        tr.appendChild(el("td", { "class": "num" }, fmt(r.actual_tokens)));
+        tr.appendChild(el("td", { "class": "num" }, fmt(r.baseline_tokens)));
+        tr.appendChild(el("td", { "class": "num" }, fmt(saved)));
+        body.appendChild(tr);
+      });
+    }).catch(function () {
+      setStatus(false);
+    }).then(function () { if (ok) setStatus(true); });
+
+    fetch("/stats").then(function (r) { return r.json(); }).then(function (d) {
+      var s = d.stats || {};
+      var sl = document.getElementById("stat-list").children;
+      var keys = ["knowledge", "code", "skill", "graph_nodes"];
+      keys.forEach(function (k, i) { if (sl[i]) sl[i].querySelector(".val").textContent = fmt(s[k]); });
+    }).catch(function () {});
+  }
+
+  function setStatus(on) {
+    var dot = document.getElementById("status-dot");
+    var txt = document.getElementById("status-text");
+    dot.className = "dot" + (on ? "" : " off");
+    txt.textContent = on ? "服务在线 · 埋点实时监控中" : "服务离线";
+  }
+
+  refresh();
+  setInterval(refresh, REFRESH_MS);
+})();
+</script>
+</body>
+</html>

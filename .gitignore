@@ -1,0 +1,25 @@
+# Python 运行时
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 运行时数据（SQLite 数据库、索引、埋点，含用户数据，不入库）
+data/
+
+# 本地配置（可能含敏感 token，仅提交 config.example.json 模板）
+config.json
+
+# 生成的报告（性能/基准报告，可本地再生成）
+reports/
+
+# 含本机/局域网部署敏感信息的知识文档（IP / MAC / SSH 端口）
+knowledge_repo/虚拟机环境与访问.md
+knowledge_repo/SearXNG部署.md
+knowledge_repo/MolBase部署.md
+
+# 临时与系统文件
+*.log
+.DS_Store
+Thumbs.db

@@ -1,0 +1,44 @@
+# SearXNG 配置（专为 MolBase 网络搜索兜底定制，适配国内网络环境）
+# 关键点：
+#   1. server.limiter=false  关闭限流（否则 JSON 接口连续请求会被 429）
+#   2. search.formats 含 json 显式开启 JSON 输出
+#   3. server.secret_key 必填（缺省会导致 SearXNG 启动报错）
+#   4. general.contact_url 必填（wikipedia/wikidata/openstreetmap 等引擎依赖）
+#   5. 仅启用国内可达引擎 wikipedia/bing；禁用 duckduckgo/google/brave（超时）、
+#      baidu（百度改版致 SearXNG 解析失败）
+use_default_settings: true
+
+general:
+  instance_name: "MolBase SearXNG"
+  contact_url: "mailto:molbase-admin@example.com"
+
+server:
+  secret_key: "molbase-searxng-change-me-to-random-string"
+  bind_address: "0.0.0.0"
+  limiter: false
+  public_instance: false
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  formats:
+    - html
+    - json
+
+engines:
+  - name: wikipedia
+    disabled: false
+  - name: bing
+    disabled: false
+  - name: duckduckgo
+    disabled: true
+  - name: google
+    disabled: true
+  - name: brave
+    disabled: true
+  - name: baidu
+    disabled: true
+  - name: wikidata
+    disabled: true
+  - name: openstreetmap
+    disabled: true
