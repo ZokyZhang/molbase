@@ -9,7 +9,8 @@ MolBase 虚拟机热更新脚本：上传本次改动的代码文件 + 用 syste
 
 不覆盖 data/molbase.db（虚拟机库是中心，本机测试数据不回流）。
 
-硬编码参数：VM_HOST=10.0.0.200, VM_USER=zoky, VM_PASS=FamilyEdu@2026,
+硬编码参数：VM_HOST=molbase.lan（hosts 解析到 192.168.101.200，IP 漂移不影响）,
+VM_USER=zoky, VM_PASS=FamilyEdu@2026,
 VM_TARGET=/home/zoky/molbase。sudo 密码经 stdin 传给 sudo -S。
 """
 
@@ -21,7 +22,7 @@ from pathlib import Path
 
 import paramiko
 
-VM_HOST = "10.0.0.200"
+VM_HOST = "molbase.lan"
 VM_USER = "zoky"
 VM_PASS = "FamilyEdu@2026"
 VM_TARGET = "/home/zoky/molbase"

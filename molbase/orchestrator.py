@@ -768,7 +768,7 @@ class Orchestrator:
         return self.store.get(entry_id)
 
     def backfill_summaries(self, limit: int = BACKFILL_BATCH) -> dict:
-        """批量回填存量摘要：找 summary 为空的条目逐个生成并回写。"""
+        """批量回填存量摘要：找 summary 为空的条目逐个生成并回写，完成后重建索引刷新缓存。"""
         entries = self.store.list_no_summary(limit)
         done = 0
         for e in entries:
@@ -779,6 +779,8 @@ class Orchestrator:
                     done += 1
             except Exception:
                 continue
+        if done > 0:
+            self._rebuild()  # 回写后重建索引，让 query 立即读到新摘要（否则缓存里仍是旧空值）
         return {"scanned": len(entries), "backfilled": done}
 
     def chunk(self, text: str, max_chars: int = 500) -> list[str]:
