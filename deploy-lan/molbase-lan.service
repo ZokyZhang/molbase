@@ -1,0 +1,24 @@
+# MolBase 局域网知识库服务器 systemd 服务单元
+# 部署位置：虚拟机 /etc/systemd/system/molbase-lan.service
+# 启用：sudo systemctl daemon-reload && sudo systemctl enable --now molbase-lan
+# 说明：以普通用户 zoky 运行，项目位于 /home/zoky/molbase，监听 0.0.0.0:8787
+
+[Unit]
+Description=MolBase Knowledge Base Server (LAN)
+Documentation=http://10.0.0.200:8787/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 普通用户运行，避免 root 权限扩大
+User=zoky
+WorkingDirectory=/home/zoky/molbase
+# 硬编码监听 0.0.0.0:8787，不鉴权（受信内网）
+ExecStart=/usr/bin/python3 -m molbase.server --host 0.0.0.0 --port 8787
+# 进程异常退出自动拉起
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

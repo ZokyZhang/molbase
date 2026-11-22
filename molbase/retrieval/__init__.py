@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from ..config import (
+    DEVICE_BOOST,
     FINAL_TOP_K,
     FRESHNESS_HALF_LIFE_DAYS,
     RERANK_WEIGHT_FRESH,
@@ -77,6 +78,7 @@ class Reranker:
         hits: list[ScoredHit],
         embedder: Optional[EmbeddingProvider] = None,
         query: str = "",
+        device_mac: Optional[str] = None,
     ) -> list[RankedResult]:
         """
         对召回命中做三信号综合重排，返回综合得分降序的 FINAL_TOP_K 条。
@@ -112,7 +114,11 @@ class Reranker:
 
         results: list[RankedResult] = []
         for hit, s, h, f in zip(hits, sim_n, heat_n, fresh_n):
+            # 计算基础综合得分
             score = self.w_sim * s + self.w_heat * h + self.w_fresh * f
+            # 若 device_mac 非空且条目匹配，则增加设备加权分
+            if device_mac and hit.entry.meta.get("device_mac") == device_mac:
+                score += DEVICE_BOOST
             results.append(
                 RankedResult(
                     entry=hit.entry,
@@ -166,4 +172,3 @@ class Retriever:
 
         ranked = sorted(hits.values(), key=lambda h: h.score, reverse=True)
         return ranked[:top_n]
-

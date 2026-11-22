@@ -3,12 +3,12 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>MolBase · Token 优化实时监控</title>
+<title>MolBase · 知识库效能监控</title>
 <style>
   :root {
     --bg: #f4f6fb; --card: #ffffff; --ink: #1a1d24; --muted: #6b7280;
     --brand: #2563eb; --save: #16a34a; --base: #94a3b8; --line: #e5e7eb;
-    --model: #7c3aed; --proxy: #0891b2; --warn: #d97706;
+    --model: #7c3aed; --proxy: #0891b2; --warn: #d97706; --danger: #dc2626;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
@@ -18,314 +18,500 @@
   }
   .topbar {
     background: linear-gradient(135deg, #1e3a8a 0%, #2563eb 60%, #0891b2 100%);
-    color: #fff; padding: 18px 24px; display: flex; align-items: center;
+    color: #fff; padding: 16px 24px; display: flex; align-items: center;
     justify-content: space-between; flex-wrap: wrap; gap: 12px;
   }
   .topbar h1 { font-size: 20px; font-weight: 700; letter-spacing: .5px; }
   .topbar .sub { font-size: 12px; opacity: .85; margin-top: 2px; }
-  .badge {
-    display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px;
-    border-radius: 20px; font-size: 12px; font-weight: 600; background: rgba(255,255,255,.16);
-  }
+  .badge { display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px;
+    border-radius: 20px; font-size: 12px; font-weight: 600; background: rgba(255,255,255,.16); }
   .dot { width: 8px; height: 8px; border-radius: 50%; background: #4ade80; }
   .dot.off { background: #f87171; }
   .wrap { max-width: 1180px; margin: 0 auto; padding: 20px; }
-  .cards { display: grid; grid-template-columns: repeat(5, 1fr); gap: 14px; margin-bottom: 16px; }
-  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 18px; }
-  .card .k { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
-  .card .v { font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; }
-  .card .v.green { color: var(--save); }
-  .card .v.blue { color: var(--brand); }
-  .card .v.purple { color: var(--model); }
-  .card .u { font-size: 11px; color: var(--muted); margin-top: 6px; }
-  .grid2 { display: grid; grid-template-columns: 1.7fr 1fr; gap: 14px; margin-bottom: 16px; }
   section { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 18px; }
-  h2 { font-size: 15px; margin-bottom: 14px; padding-left: 10px; border-left: 3px solid var(--brand); }
-  .legend { display: flex; gap: 16px; font-size: 12px; color: var(--muted); margin-bottom: 10px; flex-wrap: wrap; }
-  .legend span { display: inline-flex; align-items: center; gap: 5px; }
-  .sw { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
-  .sw.blue { background: var(--brand); } .sw.base { background: var(--base); } .sw.save { background: var(--save); }
-  svg { width: 100%; height: auto; display: block; }
+  h2 { font-size: 15px; margin-bottom: 14px; padding-left: 10px; border-left: 3px solid var(--brand); font-weight: 600; }
+
+  /* 1. Token 大卡 */
+  .token-cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 16px; }
+  .tcard { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 18px; }
+  .tcard .k { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+  .tcard .v { font-size: 28px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.1; }
+  .tcard .v.green { color: var(--save); }
+  .tcard .v.blue { color: var(--brand); }
+  .tcard .v.purple { color: var(--model); }
+  .tcard .u { font-size: 11px; color: var(--muted); margin-top: 6px; }
+  .tcard .bigbar { height: 8px; background: #eef1f6; border-radius: 4px; margin-top: 10px; overflow: hidden; }
+  .tcard .bigbar > i { display: block; height: 100%; background: var(--save); border-radius: 4px; }
+
+  /* 2. 飞轮 */
+  .flywheel { margin-bottom: 16px; }
+  .wheel { display: flex; align-items: stretch; gap: 8px; flex-wrap: wrap; }
+  .step { flex: 1; min-width: 150px; background: #fafbfc; border: 1px solid var(--line);
+    border-radius: 12px; padding: 14px; text-align: center; }
+  .step .sname { font-size: 13px; font-weight: 600; color: var(--ink); }
+  .step .snum { font-size: 24px; font-weight: 700; color: var(--brand); margin: 6px 0 2px;
+    font-variant-numeric: tabular-nums; }
+  .step .sdesc { font-size: 11px; color: var(--muted); line-height: 1.5; }
+  .step.heat .snum { color: var(--warn); }
+  .step.gen .snum { color: var(--save); }
+  .warrow { align-self: center; color: var(--base); font-size: 20px; font-weight: 700; }
+
+  /* 3. 两列 */
+  .grid2 { display: grid; grid-template-columns: 1.6fr 1fr; gap: 14px; margin-bottom: 16px; }
+  @media (max-width: 900px) { .grid2 { grid-template-columns: 1fr; } .token-cards { grid-template-columns: repeat(2, 1fr); } }
+
+  /* 标签条形图 */
+  .tagbar { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .tagbar .tname { width: 64px; font-size: 12px; color: var(--muted); text-align: right; flex-shrink: 0; }
+  .tagbar .tbar { flex: 1; height: 16px; background: #eef1f6; border-radius: 4px; overflow: hidden; }
+  .tagbar .tbar > i { display: block; height: 100%; background: var(--brand); border-radius: 4px; }
+  .tagbar .tval { width: 40px; font-size: 12px; color: var(--ink); font-variant-numeric: tabular-nums; }
+
+  /* 通用表格 / 列表 */
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
   th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); }
   th { color: var(--muted); font-weight: 600; background: #fafbfc; font-size: 12px; }
   tr:last-child td { border-bottom: none; }
   .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+  .pill.ok { background: #dcfce7; color: #15803d; }
+  .pill.miss { background: #fee2e2; color: #b91c1c; }
+  .pill.st { background: #e0f2fe; color: #0369a1; }
+  .pill.new { background: #dcfce7; color: #15803d; }
+  .pill.merge { background: #e0f2fe; color: #0369a1; }
+  .pill.dup { background: #fef3c7; color: #92400e; }
+  .pill.conflict { background: #fee2e2; color: #b91c1c; }
+  .pill.pinned { background: #f3e8ff; color: #6d28d9; }
+  .stat-list { list-style: none; }
+  .stat-list li { display: flex; justify-content: space-between; padding: 9px 0; border-bottom: 1px solid var(--line); }
+  .stat-list li:last-child { border-bottom: none; }
+  .stat-list .label { color: var(--muted); }
+  .stat-list .val { font-weight: 700; font-variant-numeric: tabular-nums; }
+  .empty { color: var(--muted); text-align: center; padding: 24px 0; }
+  .foot { color: var(--muted); font-size: 12px; text-align: center; padding: 8px 0 24px; }
   .tag { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11px; }
   .tag.knowledge { background: #e0f2fe; color: #0369a1; }
   .tag.code { background: #f3e8ff; color: var(--model); }
   .tag.skill { background: #ecfeff; color: var(--proxy); }
-  .stat-list { list-style: none; }
-  .stat-list li { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid var(--line); }
-  .stat-list li:last-child { border-bottom: none; }
-  .stat-list .label { color: var(--muted); }
-  .stat-list .val { font-weight: 700; font-variant-numeric: tabular-nums; }
-  .empty { color: var(--muted); text-align: center; padding: 30px 0; }
-  .foot { color: var(--muted); font-size: 12px; text-align: center; padding: 8px 0 24px; }
-  @media (max-width: 900px) { .cards { grid-template-columns: repeat(2, 1fr); } .grid2 { grid-template-columns: 1fr; } }
+  .tag.test { background: #fef3c7; color: #92400e; }
+
+  /* 5. 弃答归因 */
+  .abstain { margin-bottom: 16px; }
+  .abstain-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 14px; }
+  .acard { background: #fafbfc; border: 1px solid var(--line); border-radius: 12px; padding: 14px; }
+  .acard .aname { font-size: 13px; font-weight: 600; margin-bottom: 4px; }
+  .acard .anum { font-size: 22px; font-weight: 700; margin: 6px 0 2px; font-variant-numeric: tabular-nums; }
+  .acard .afix { font-size: 12px; color: var(--muted); line-height: 1.5; }
+  @media (max-width: 900px) { .abstain-cards { grid-template-columns: 1fr; } }
+  .pill.nodata { background: #fee2e2; color: #b91c1c; }
+  .pill.weak { background: #fef3c7; color: #92400e; }
+  .pill.ambig { background: #e0f2fe; color: #0369a1; }
+
+  /* 6. 回写明细 */
+  .writeback { margin-bottom: 16px; }
+  .pill.wb-ingest { background: #dcfce7; color: #15803d; }
+  .pill.wb-harvest { background: #f3e8ff; color: #6d28d9; }
+  .pill.wb-feedback { background: #e0f2fe; color: #0369a1; }
+  .pill.wb-evolve { background: #ede9fe; color: #5b21b6; }
+  .pill.wb-tooltrace { background: #fef3c7; color: #92400e; }
+
+  /* 7. 会话参与度 */
+  .participation { margin-bottom: 16px; }
 </style>
 </head>
 <body>
 <div class="topbar">
   <div>
-    <h1>MolBase · Token 优化实时监控</h1>
-    <div class="sub">知识库本体（表） + 代工中间层（存储过程） + 监控大屏（配套服务） · 数据源自知识库 /metrics · /stats</div>
+    <h1>MolBase · 知识库效能监控</h1>
+    <div class="sub">token 节省 · 飞轮运转 · 入库与会话链路 · 知识库本体 · 数据源自 /overview</div>
   </div>
-  <div class="badge" id="status-badge"><span class="dot" id="status-dot"></span><span id="status-text">连接中…</span></div>
+  <div class="badge"><span class="dot" id="status-dot"></span><span id="status-text">连接中…</span></div>
 </div>
 
 <div class="wrap">
-  <!-- 核心指标卡 -->
-  <div class="cards">
-    <div class="card"><div class="k">累计查询（持久化）</div><div class="v blue" id="m-queries">-</div><div class="u">baseline&gt;0 的埋点记录</div></div>
-    <div class="card"><div class="k">累计节省 token</div><div class="v green" id="m-saved">-</div><div class="u">基线 − 实际返回</div></div>
-    <div class="card"><div class="k">节省比例</div><div class="v green" id="m-ratio">-</div><div class="u">越用越省的整体效果</div></div>
-    <div class="card"><div class="k">等效节省成本</div><div class="v purple" id="m-cost">-</div><div class="u">若上云 API 折算（¥）</div></div>
-    <div class="card"><div class="k">平均置信度</div><div class="v blue" id="m-conf">-</div><div class="u">检索质量底线</div></div>
+  <!-- ① Token 消耗与节省（直观大卡） -->
+  <div class="token-cards">
+    <div class="tcard"><div class="k">累计消耗 token（实际返回）</div><div class="v blue" id="t-actual">-</div><div class="u">大模型真实吃进的上下文</div></div>
+    <div class="tcard"><div class="k">累计节省 token</div><div class="v green" id="t-saved">-</div><div class="u">召回候选 → 最小上下文的收敛</div></div>
+    <div class="tcard"><div class="k">节省率</div><div class="v green" id="t-ratio">-</div><div class="bigbar"><i id="t-ratio-bar" style="width:0%"></i></div><div class="u">越高越省</div></div>
+    <div class="tcard"><div class="k">等效降本（按输入单价 ¥2/百万）</div><div class="v purple" id="t-cost">-</div><div class="u">若上云等效节省金额</div></div>
   </div>
 
-  <!-- 趋势图 + 右侧统计 -->
+  <!-- ② 飞轮运转 -->
+  <section class="flywheel">
+    <h2>飞轮运转（查询 → 命中 → 反馈 → 进化 → 更准）</h2>
+    <div class="wheel" id="wheel"></div>
+  </section>
+
+  <!-- ②-1 弃答归因（为什么拦截 · 怎么整改） -->
+  <section class="abstain">
+    <h2>弃答归因（为什么拦截 · 怎么整改）</h2>
+    <div class="abstain-cards" id="abstain-cards"></div>
+    <table>
+      <thead><tr><th>最近弃答查询（缺口）</th><th>归因</th><th class="num">候选数</th><th class="num">置信度</th><th>整改建议</th></tr></thead>
+      <tbody id="abstain-body"><tr><td colspan="5" class="empty">暂无弃答记录（出现 abstain 后累计）</td></tr></tbody>
+    </table>
+  </section>
+
+  <!-- ②-2 回写明细（密切关注数据回写） -->
+  <section class="writeback">
+    <h2>回写明细（最近 10 条写库动作 · 入库 / 会话回写 / 反馈 / 进化 / 工具轨迹）</h2>
+    <table>
+      <thead><tr><th>时间</th><th>类型</th><th>对象</th><th>状态 / 动作</th><th>摘要</th></tr></thead>
+      <tbody id="writeback-body"><tr><td colspan="5" class="empty">暂无回写记录（入库/反馈/进化/轨迹发生后累计）</td></tr></tbody>
+    </table>
+  </section>
+
+  <!-- ②-3 会话参与度（每个会话参与几次 · 是否逃票） -->
+  <section class="participation">
+    <h2>会话参与度（每个会话 MolBase 参与几次 · 是否带标签逃票）</h2>
+    <table>
+      <thead><tr><th>会话</th><th class="num">参与次数</th><th class="num">命中</th><th class="num">弃答</th><th>首次查询</th><th>逃票判定</th></tr></thead>
+      <tbody id="participation-body"><tr><td colspan="6" class="empty">暂无会话参与数据（query 归集到会话后出现）</td></tr></tbody>
+    </table>
+  </section>
+
+  <!-- ③ 入库明细 + 会话链路 / 知识库本体 -->
   <div class="grid2">
     <section>
-      <h2>Token 消耗趋势（最近 N 次查询）</h2>
-      <div class="legend">
-        <span><i class="sw base"></i>无代工层基线（模型自读全表）</span>
-        <span><i class="sw blue"></i>有代工层实际返回</span>
-        <span>两线之间阴影 = 节省差额</span>
-      </div>
-      <div id="chart"></div>
+      <h2>入库情况（有没有入 · 入成什么样）</h2>
+      <div id="ingest-box"></div>
+      <h2 style="margin-top:16px;">会话链路（每会话走了哪几步 · 缺哪步）</h2>
+      <table>
+        <thead><tr><th>会话</th><th class="num">查询</th><th class="num">反馈</th><th class="num">沉淀</th><th class="num">轨迹</th><th>缺失步骤</th></tr></thead>
+        <tbody id="session-body"><tr><td colspan="6" class="empty">暂无会话数据（query/feedback 传 session_id 后出现）</td></tr></tbody>
+      </table>
     </section>
     <section>
-      <h2>知识库本体统计</h2>
-      <ul class="stat-list" id="stat-list">
+      <h2>知识库本体</h2>
+      <ul class="stat-list" id="catalog-list">
         <li><span class="label">知识条目</span><span class="val">-</span></li>
         <li><span class="label">代码符号</span><span class="val">-</span></li>
         <li><span class="label">技能包</span><span class="val">-</span></li>
         <li><span class="label">关联图节点</span><span class="val">-</span></li>
+        <li><span class="label">运行内存（RSS）</span><span class="val">-</span></li>
       </ul>
-      <h2 style="margin-top:16px;">会话实时台账（本进程）</h2>
-      <ul class="stat-list" id="ledger-list">
-        <li><span class="label">会话查询数</span><span class="val">-</span></li>
-        <li><span class="label">会话节省 token</span><span class="val">-</span></li>
-      </ul>
-      <h2 style="margin-top:16px;">操作模式收敛（自进化）</h2>
-      <ul class="stat-list" id="tooltrace-list">
-        <li><span class="label">工具轨迹总数</span><span class="val">-</span></li>
-        <li><span class="label">不同操作指纹</span><span class="val">-</span></li>
-        <li><span class="label">已自动生成 skill</span><span class="val">-</span></li>
-      </ul>
+      <h2 style="margin-top:16px;">标签分布（各分类条数）</h2>
+      <div id="tag-box"><div class="empty">暂无标签数据</div></div>
     </section>
   </div>
 
-  <!-- 高频操作指纹 -->
-  <section>
-    <h2>高频操作指纹（重复操作 · 达标自动固化为 skill）</h2>
-    <table>
-      <thead><tr>
-        <th>操作指纹（工具名 + 参数键）</th><th class="num">出现次数</th><th>来源意图</th>
-      </tr></thead>
-      <tbody id="fingerprint-body"><tr><td colspan="3" class="empty">暂无数据，喂入一次 /tooltrace 后这里会出现重复操作模式</td></tr></tbody>
-    </table>
-  </section>
+  <!-- ④ 接口调用 + 明细 -->
+  <div class="grid2">
+    <section>
+      <h2>接口调用率</h2>
+      <table>
+        <thead><tr><th>接口</th><th class="num">调用次数</th><th>占比</th></tr></thead>
+        <tbody id="apicall-body"><tr><td colspan="3" class="empty">暂无调用数据</td></tr></tbody>
+      </table>
+    </section>
+    <section>
+      <h2>最近查询明细</h2>
+      <table>
+        <thead><tr><th>时间</th><th>查询</th><th class="num">命中</th><th class="num">实际</th><th class="num">基线</th></tr></thead>
+        <tbody id="detail-body"><tr><td colspan="5" class="empty">暂无数据</td></tr></tbody>
+      </table>
+    </section>
+  </div>
 
-  <!-- 明细表 -->
-  <section>
-    <h2>最近查询明细（埋点流水）</h2>
-    <table>
-      <thead><tr>
-        <th>时间</th><th>查询</th><th>路由</th><th class="num">命中</th>
-        <th class="num">实际 token</th><th class="num">基线 token</th><th class="num">节省 token</th>
-      </tr></thead>
-      <tbody id="detail-body"><tr><td colspan="7" class="empty">暂无数据</td></tr></tbody>
-    </table>
-  </section>
-
-  <div class="foot">数据每 3 秒自动刷新 · token 为粗估值（中文 1 字≈1 token，英文 4 字符≈1 token）· 成本按输入 ¥2.0/1M、输出 ¥8.0/1M 等效折算</div>
+  <div class="foot">数据每 3 秒自动刷新 · token 为粗估值（中文 1 字≈1 token，英文 4 字符≈1 token）· 环节日志（反馈/入库/进化/会话）自本次改版起累计</div>
 </div>
 
 <script>
 (function () {
   "use strict";
   var REFRESH_MS = 3000;
-  var CHART_W = 720, CHART_H = 240, PAD_L = 56, PAD_R = 16, PAD_T = 16, PAD_B = 30;
 
-  var SVG_NS = "http://www.w3.org/2000/svg";
-  var SVG_TAGS = { svg:1, g:1, line:1, path:1, circle:1, text:1, rect:1, polyline:1 };
-
-  // 创建元素：SVG 标签用 createElementNS（否则折线图不渲染）；
-  // child 为 DOM 节点时 appendChild，为字符串/数字时写 textContent。
   function el(tag, attrs, child) {
-    var n = SVG_TAGS[tag]
-      ? document.createElementNS(SVG_NS, tag)
-      : document.createElement(tag);
+    var n = document.createElement(tag);
     if (attrs) for (var k in attrs) n.setAttribute(k, attrs[k]);
     if (child != null) {
-      if (typeof child === "string" || typeof child === "number") {
-        n.textContent = String(child);
-      } else if (child && child.nodeType) {
-        n.appendChild(child);
-      }
+      if (typeof child === "string" || typeof child === "number") n.textContent = String(child);
+      else if (child && child.nodeType) n.appendChild(child);
     }
     return n;
   }
-
-  // ---- 格式化 ----
-  function fmt(n) { return (n == null) ? "-" : Number(n).toLocaleString("en-US"); }
-  function pct(x) { return (x == null) ? "-" : (x * 100).toFixed(1) + "%"; }
-  function costOf(tokens) { return "¥" + (tokens / 1000000 * 2.0).toFixed(4); }
+  function fmt(n) { return (n == null || n === "") ? "-" : Number(n).toLocaleString("en-US"); }
   function tsTime(ts) {
     var d = new Date(ts * 1000);
     function p(n) { return (n < 10 ? "0" : "") + n; }
     return p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds());
   }
+  function tsFull(ts) {
+    var d = new Date(ts * 1000);
+    function p(n) { return (n < 10 ? "0" : "") + n; }
+    return p(d.getMonth() + 1) + "-" + p(d.getDate()) + " " + p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds());
+  }
+  function setStatus(on) {
+    document.getElementById("status-dot").className = "dot" + (on ? "" : " off");
+    document.getElementById("status-text").textContent = on ? "服务在线 · 实时监控中" : "服务离线";
+  }
 
-  // ---- SVG 折线图 ----
-  function renderChart(recent) {
-    var host = document.getElementById("chart");
+  // 渲染飞轮
+  function renderWheel(fw) {
+    var host = document.getElementById("wheel");
     host.innerHTML = "";
-    // recent 为倒序（最新在前），翻转为时间正序（旧→新）
-    var rows = recent.slice().reverse();
-    if (!rows.length) {
-      host.appendChild(el("div", { "class": "empty" }, "暂无埋点数据，发起一次 /query 后这里会出现趋势"));
+    var steps = [
+      { name: "查询", num: fmt(fw.queries), desc: "次检索（驱动一切）", cls: "" },
+      { name: "命中", num: fmt(fw.hits_total), desc: "累计命中条目", cls: "heat" },
+      { name: "反馈", num: fmt((fw.feedback && fw.feedback.total) || 0), desc: describeFeedback(fw.feedback), cls: "" },
+      { name: "进化", num: fmt((fw.evolve && fw.evolve.steps) || 0), desc: describeEvolve(fw.evolve), cls: "" },
+      { name: "更准", num: fmt(fw.auto_skills), desc: "自动固化 skill · 拦截率 " + pct(fw.intercept_rate), cls: "gen" },
+    ];
+    steps.forEach(function (s, i) {
+      if (i > 0) host.appendChild(el("div", { "class": "warrow" }, "→"));
+      var d = el("div", { "class": "step " + s.cls });
+      d.appendChild(el("div", { "class": "sname" }, s.name));
+      d.appendChild(el("div", { "class": "snum" }, s.num));
+      d.appendChild(el("div", { "class": "sdesc" }, s.desc));
+      host.appendChild(d);
+    });
+  }
+  function describeFeedback(fb) {
+    if (!fb || !fb.total) return "尚无反馈动作";
+    var by = fb.by_action || {};
+    var parts = [];
+    for (var k in by) parts.push(k + " " + by[k]);
+    return parts.join(" · ");
+  }
+  function describeEvolve(ev) {
+    if (!ev) return "尚无进化步进";
+    return "建边 " + fmt(ev.added_edges) + " · 衰减 " + fmt(ev.decayed) + " · 归档 " + fmt(ev.archived);
+  }
+  function pct(x) { return (x == null) ? "-" : (x * 100).toFixed(1) + "%"; }
+
+  // 渲染入库分布
+  function renderIngest(ig) {
+    var host = document.getElementById("ingest-box");
+    host.innerHTML = "";
+    var by = (ig && ig.by_state) || {};
+    var keys = Object.keys(by);
+    if (!keys.length) {
+      host.appendChild(el("div", { "class": "empty" }, "暂无入库记录（调用 /ingest/knowledge 后出现）"));
       return;
     }
-    var maxTok = 1;
-    rows.forEach(function (r) { maxTok = Math.max(maxTok, r.baseline_tokens || 0); });
-
-    var svg = el("svg", { viewBox: "0 0 " + CHART_W + " " + CHART_H, preserveAspectRatio: "xMidYMid meet" });
-    var g = el("g");
-
-    // 网格 + Y 轴刻度
-    var gridLines = 4;
-    for (var i = 0; i <= gridLines; i++) {
-      var y = PAD_T + (CHART_H - PAD_T - PAD_B) * i / gridLines;
-      var val = Math.round(maxTok * (1 - i / gridLines));
-      g.appendChild(el("line", { x1: PAD_L, y1: y, x2: CHART_W - PAD_R, y2: y, stroke: "#eef1f6", "stroke-width": 1 }));
-      g.appendChild(el("text", { x: PAD_L - 8, y: y + 4, "text-anchor": "end", fill: "#9aa1ad", "font-size": 10 }, fmt(val)));
-    }
-
-    var n = rows.length;
-    var plotW = CHART_W - PAD_L - PAD_R, plotH = CHART_H - PAD_T - PAD_B;
-    function px(i) { return PAD_L + (n === 1 ? plotW / 2 : plotW * i / (n - 1)); }
-    function py(v) { return PAD_T + plotH * (1 - v / maxTok); }
-
-    // 面积：基线（灰）
-    var areaD = "M" + px(0) + "," + py(rows[0].baseline_tokens);
-    for (var i = 1; i < n; i++) areaD += " L" + px(i) + "," + py(rows[i].baseline_tokens);
-    areaD += " L" + px(n - 1) + "," + (PAD_T + plotH) + " L" + px(0) + "," + (PAD_T + plotH) + " Z";
-    g.appendChild(el("path", { d: areaD, fill: "#94a3b8", opacity: 0.18 }));
-
-    // 面积：实际（蓝）
-    var areaA = "M" + px(0) + "," + py(rows[0].actual_tokens);
-    for (var j = 1; j < n; j++) areaA += " L" + px(j) + "," + py(rows[j].actual_tokens);
-    areaA += " L" + px(n - 1) + "," + (PAD_T + plotH) + " L" + px(0) + "," + (PAD_T + plotH) + " Z";
-    g.appendChild(el("path", { d: areaA, fill: "#2563eb", opacity: 0.15 }));
-
-    // 折线：基线
-    var lineD = "M" + px(0) + "," + py(rows[0].baseline_tokens);
-    for (var k = 1; k < n; k++) lineD += " L" + px(k) + "," + py(rows[k].baseline_tokens);
-    g.appendChild(el("path", { d: lineD, fill: "none", stroke: "#94a3b8", "stroke-width": 2, "stroke-dasharray": "5 4" }));
-
-    // 折线：实际
-    var lineA = "M" + px(0) + "," + py(rows[0].actual_tokens);
-    for (var m = 1; m < n; m++) lineA += " L" + px(m) + "," + py(rows[m].actual_tokens);
-    g.appendChild(el("path", { d: lineA, fill: "none", stroke: "#2563eb", "stroke-width": 2.5 }));
-
-    // 数据点（实际）
-    rows.forEach(function (r, i) {
-      g.appendChild(el("circle", { cx: px(i), cy: py(r.actual_tokens), r: 3.5, fill: "#2563eb" }));
+    var clsMap = { new: "new", merge: "merge", duplicate: "dup", conflict: "conflict", pinned: "pinned" };
+    var total = ig.total || 0;
+    var wrap = el("div");
+    var bar = el("div", { style: "display:flex;height:18px;border-radius:9px;overflow:hidden;margin-bottom:10px;background:#eef1f6" });
+    var colors = { new: "#16a34a", merge: "#2563eb", duplicate: "#d97706", conflict: "#dc2626", pinned: "#7c3aed" };
+    keys.forEach(function (k) {
+      if (!total) return;
+      var seg = el("div", { style: "width:" + (by[k] / total * 100) + "%;background:" + (colors[k] || "#888780") });
+      seg.title = k;
+      bar.appendChild(seg);
     });
-
-    // X 轴标签（时间）
-    var step = Math.max(1, Math.floor(n / 8));
-    rows.forEach(function (r, i) {
-      if (i % step === 0 || i === n - 1) {
-        g.appendChild(el("text", { x: px(i), y: CHART_H - 8, "text-anchor": "middle", fill: "#9aa1ad", "font-size": 10 }, tsTime(r.ts)));
-      }
+    wrap.appendChild(bar);
+    keys.forEach(function (k) {
+      var row = el("div", { style: "display:flex;justify-content:space-between;padding:5px 0;font-size:13px" });
+      row.appendChild(el("span", {}, el("span", { "class": "pill " + (clsMap[k] || "st") }, labelState(k))));
+      row.appendChild(el("span", { "class": "num" }, fmt(by[k]) + " 条"));
+      wrap.appendChild(row);
     });
-
-    svg.appendChild(g);
-    host.appendChild(svg);
+    host.appendChild(wrap);
+  }
+  function labelState(k) {
+    var m = { new: "新增", merge: "合并", duplicate: "重复跳过", conflict: "冲突待裁", pinned: "固定保护" };
+    return m[k] || k;
   }
 
-  // ---- 数据拉取与渲染 ----
+  // 渲染会话链路
+  function renderSessions(sess) {
+    var body = document.getElementById("session-body");
+    body.innerHTML = "";
+    if (!sess || !sess.length) {
+      body.appendChild(el("tr", {}, el("td", { colspan: 6, "class": "empty" }, "暂无会话数据（query/feedback 传 session_id 后出现）")));
+      return;
+    }
+    sess.slice(0, 15).forEach(function (s) {
+      var tr = el("tr");
+      tr.appendChild(el("td", {}, s.session_id || "-"));
+      tr.appendChild(el("td", { "class": "num" }, s.query ? el("span", { "class": "pill ok" }, s.query) : "-"));
+      tr.appendChild(el("td", { "class": "num" }, s.feedback ? el("span", { "class": "pill ok" }, s.feedback) : "-"));
+      tr.appendChild(el("td", { "class": "num" }, s.harvest ? el("span", { "class": "pill ok" }, s.harvest) : "-"));
+      tr.appendChild(el("td", { "class": "num" }, s.tooltrace ? el("span", { "class": "pill ok" }, s.tooltrace) : "-"));
+      var miss = (s.missing || []).length ? s.missing.join("、") : "完整";
+      tr.appendChild(el("td", {}, el("span", { "class": "pill " + ((s.missing || []).length ? "miss" : "ok") }, miss)));
+      body.appendChild(tr);
+    });
+  }
+
+  // 渲染本体 + 标签
+  function renderCatalog(cat) {
+    var sl = document.getElementById("catalog-list").children;
+    var keys = ["knowledge", "code", "skill", "graph_nodes"];
+    keys.forEach(function (k, i) { if (sl[i]) sl[i].querySelector(".val").textContent = fmt(cat[k]); });
+    var mem = cat.memory || {};
+    var memLi = sl[4];
+    if (memLi) memLi.querySelector(".val").textContent = (mem.rss_mb != null) ? (fmt(mem.rss_mb) + " MB") : "-";
+
+    var tb = document.getElementById("tag-box");
+    tb.innerHTML = "";
+    var tags = cat.tags || {};
+    var tkeys = Object.keys(tags);
+    if (!tkeys.length) { tb.appendChild(el("div", { "class": "empty" }, "暂无标签")); return; }
+    var max = Math.max.apply(null, tkeys.map(function (k) { return tags[k]; })) || 1;
+    tkeys.forEach(function (k) {
+      var row = el("div", { "class": "tagbar" });
+      row.appendChild(el("div", { "class": "tname" }, k));
+      var b = el("div", { "class": "tbar" });
+      b.appendChild(el("i", { style: "width:" + (tags[k] / max * 100) + "%" }));
+      row.appendChild(b);
+      row.appendChild(el("div", { "class": "tval" }, tags[k]));
+      tb.appendChild(row);
+    });
+  }
+
+  // 渲染接口调用
+  function renderApiCalls(ac) {
+    var ab = document.getElementById("apicall-body");
+    ab.innerHTML = "";
+    var by = ac.by_api || {};
+    var total = ac.total || 0;
+    var keys = Object.keys(by);
+    if (!keys.length) { ab.appendChild(el("tr", {}, el("td", { colspan: 3, "class": "empty" }, "暂无调用数据"))); return; }
+    keys.forEach(function (k) {
+      var tr = el("tr");
+      tr.appendChild(el("td", {}, k));
+      tr.appendChild(el("td", { "class": "num" }, fmt(by[k])));
+      tr.appendChild(el("td", { "class": "num" }, total ? (by[k] / total * 100).toFixed(1) + "%" : "-"));
+      ab.appendChild(tr);
+    });
+  }
+
+  // 渲染明细
+  function renderDetail(recent) {
+    var body = document.getElementById("detail-body");
+    body.innerHTML = "";
+    if (!recent || !recent.length) { body.appendChild(el("tr", {}, el("td", { colspan: 5, "class": "empty" }, "暂无数据"))); return; }
+    recent.slice(0, 12).forEach(function (r) {
+      var tr = el("tr");
+      tr.appendChild(el("td", {}, tsTime(r.ts)));
+      tr.appendChild(el("td", {}, r.query || ""));
+      tr.appendChild(el("td", { "class": "num" }, fmt(r.hits)));
+      tr.appendChild(el("td", { "class": "num" }, fmt(r.actual_tokens)));
+      tr.appendChild(el("td", { "class": "num" }, fmt(r.baseline_tokens)));
+      body.appendChild(tr);
+    });
+  }
+
+  // 渲染弃答归因
+  function renderAbstain(ab) {
+    ab = ab || {};
+    var by = ab.by_reason || {};
+    var cards = document.getElementById("abstain-cards");
+    cards.innerHTML = "";
+    var defs = [
+      { key: "no_data", name: "没数据", fix: "知识库缺这块 → 补数据(ingest)", cls: "nodata" },
+      { key: "weak_match", name: "弱相关", fix: "有相关但不准 → 补更精准条目", cls: "weak" },
+      { key: "ambiguous", name: "区分度不足", fix: "多条太像 → 去重/细化", cls: "ambig" },
+    ];
+    defs.forEach(function (d) {
+      var c = el("div", { "class": "acard" });
+      c.appendChild(el("div", { "class": "aname" }, el("span", { "class": "pill " + d.cls }, d.name)));
+      c.appendChild(el("div", { "class": "anum" }, fmt(by[d.key] || 0)));
+      c.appendChild(el("div", { "class": "afix" }, d.fix));
+      cards.appendChild(c);
+    });
+
+    var body = document.getElementById("abstain-body");
+    body.innerHTML = "";
+    var recent = ab.recent || [];
+    if (!recent.length) {
+      body.appendChild(el("tr", {}, el("td", { colspan: 5, "class": "empty" }, "暂无弃答记录（出现 abstain 后累计）")));
+      return;
+    }
+    var fixMap = { no_data: "补数据", weak_match: "补精准条目", ambiguous: "去重/细化" };
+    var labelMap = {
+      no_data: { t: "没数据", cls: "nodata" },
+      weak_match: { t: "弱相关", cls: "weak" },
+      ambiguous: { t: "区分度不足", cls: "ambig" },
+    };
+    recent.slice(0, 12).forEach(function (r) {
+      var l = labelMap[r.reason] || { t: r.reason, cls: "st" };
+      var tr = el("tr");
+      tr.appendChild(el("td", {}, r.query || ""));
+      tr.appendChild(el("td", {}, el("span", { "class": "pill " + l.cls }, l.t + " · " + (r.subreason || ""))));
+      tr.appendChild(el("td", { "class": "num" }, fmt(r.recall_candidates)));
+      tr.appendChild(el("td", { "class": "num" }, (r.confidence != null) ? Number(r.confidence).toFixed(3) : "-"));
+      tr.appendChild(el("td", {}, fixMap[r.reason] || "—"));
+      body.appendChild(tr);
+    });
+  }
+
+  // 渲染回写明细
+  function renderWriteback(wb) {
+    var body = document.getElementById("writeback-body");
+    body.innerHTML = "";
+    if (!wb || !wb.length) {
+      body.appendChild(el("tr", {}, el("td", { colspan: 5, "class": "empty" }, "暂无回写记录（入库/反馈/进化/轨迹发生后累计）")));
+      return;
+    }
+    var typeCls = { ingest: "wb-ingest", harvest: "wb-harvest", feedback: "wb-feedback", evolve: "wb-evolve", tooltrace: "wb-tooltrace" };
+    var stateMap = {
+      new: "新增", merge: "合并", duplicate: "重复跳过", conflict: "冲突待裁", pinned: "固定保护",
+      hit: "命中", adopt: "采纳", cite: "引用", reject: "拒绝",
+    };
+    wb.slice(0, 10).forEach(function (r) {
+      var tr = el("tr");
+      tr.appendChild(el("td", {}, tsFull(r.ts)));
+      tr.appendChild(el("td", {}, el("span", { "class": "pill " + (typeCls[r.type] || "st") }, r.type_cn || r.type)));
+      tr.appendChild(el("td", {}, r.obj || "-"));
+      tr.appendChild(el("td", {}, (stateMap[r.state] || r.state) || "-"));
+      tr.appendChild(el("td", {}, r.detail || "-"));
+      body.appendChild(tr);
+    });
+  }
+
+  // 渲染会话参与度
+  function renderParticipation(p) {
+    var body = document.getElementById("participation-body");
+    body.innerHTML = "";
+    if (!p || !p.length) {
+      body.appendChild(el("tr", {}, el("td", { colspan: 6, "class": "empty" }, "暂无会话参与数据（query 归集到会话后出现）")));
+      return;
+    }
+    var evCls = {
+      "正常参与": "wb-ingest",
+      "首次无返回即逃票": "miss",
+      "仅查1次（疑似逃票）": "wb-tooltrace",
+      "未参与（有动作无查询）": "conflict",
+    };
+    p.slice(0, 20).forEach(function (r) {
+      var tr = el("tr");
+      tr.appendChild(el("td", {}, r.session_id || "-"));
+      tr.appendChild(el("td", { "class": "num" }, fmt(r.query_count)));
+      tr.appendChild(el("td", { "class": "num" }, fmt(r.hit_count)));
+      tr.appendChild(el("td", { "class": "num" }, fmt(r.abstain_count)));
+      tr.appendChild(el("td", {}, r.first_abstain ? el("span", { "class": "pill miss" }, "弃答") : el("span", { "class": "pill ok" }, "命中")));
+      tr.appendChild(el("td", {}, el("span", { "class": "pill " + (evCls[r.evasion] || "st") }, r.evasion)));
+      body.appendChild(tr);
+    });
+  }
+
   function refresh() {
     var ok = false;
-    fetch("/metrics").then(function (r) { return r.json(); }).then(function (d) {
+    fetch("/overview").then(function (r) { return r.json(); }).then(function (d) {
       ok = true;
-      var agg = d.aggregate || {};
-      document.getElementById("m-queries").textContent = fmt(agg.queries);
-      document.getElementById("m-saved").textContent = fmt(agg.saved_tokens);
-      document.getElementById("m-ratio").textContent = agg.saved_ratio_pct || "-";
-      document.getElementById("m-cost").textContent = costOf(agg.saved_tokens || 0);
-      document.getElementById("m-conf").textContent = (agg.confidence_avg != null) ? Number(agg.confidence_avg).toFixed(2) : "-";
+      var t = d.token || {};
+      document.getElementById("t-actual").textContent = fmt(t.actual_tokens);
+      document.getElementById("t-saved").textContent = fmt(t.saved_tokens);
+      document.getElementById("t-ratio").textContent = t.saved_ratio_pct || "-";
+      document.getElementById("t-ratio-bar").style.width = ((t.saved_ratio || 0) * 100).toFixed(1) + "%";
+      document.getElementById("t-cost").textContent = (t.saved_cost != null) ? ("¥" + t.saved_cost.toFixed(2)) : "-";
+      renderWheel(d.flywheel || {});
+      renderAbstain(d.abstain || {});
+      renderWriteback(d.writeback || []);
+      renderParticipation(d.participation || []);
+      renderIngest(d.ingest || {});
+      renderSessions(d.sessions || []);
+      renderCatalog(d.catalog || {});
+    }).catch(function () { setStatus(false); }).then(function () { if (ok) setStatus(true); });
 
-      renderChart(d.recent || []);
-
-      var led = d.ledger || {};
-      var ll = document.getElementById("ledger-list").children;
-      if (ll.length >= 2) {
-        ll[0].querySelector(".val").textContent = fmt(led.queries);
-        ll[1].querySelector(".val").textContent = fmt(led.saved_tokens);
-      }
-
-      // 操作模式收敛（自进化）
-      var tt = d.tooltraces || {};
-      var tl = document.getElementById("tooltrace-list").children;
-      var tkeys = [tt.traces, tt.fingerprints, tt.auto_skill_count];
-      tkeys.forEach(function (v, i) { if (tl[i]) tl[i].querySelector(".val").textContent = fmt(v); });
-      var fb = document.getElementById("fingerprint-body");
-      fb.innerHTML = "";
-      var top = tt.top || [];
-      if (!top.length) {
-        fb.appendChild(el("tr", {}, el("td", { colspan: 3, "class": "empty" }, "暂无数据，喂入一次 /tooltrace 后这里会出现重复操作模式")));
-      } else {
-        top.forEach(function (f) {
-          var tr = el("tr");
-          tr.appendChild(el("td", {}, f.fingerprint || ""));
-          tr.appendChild(el("td", { "class": "num" }, fmt(f.count)));
-          tr.appendChild(el("td", {}, f.intent || ""));
-          fb.appendChild(tr);
-        });
-      }
-
-      // 明细表
-      var body = document.getElementById("detail-body");
-      body.innerHTML = "";
-      var recent = d.recent || [];
-      if (!recent.length) {
-        body.appendChild(el("tr", {}, el("td", { colspan: 7, "class": "empty" }, "暂无数据")));
-        return;
-      }
-      recent.slice(0, 20).forEach(function (r) {
-        var saved = (r.baseline_tokens || 0) - (r.actual_tokens || 0);
-        var tr = el("tr");
-        tr.appendChild(el("td", {}, tsTime(r.ts)));
-        tr.appendChild(el("td", {}, r.query || ""));
-        tr.appendChild(el("td", {}, el("span", { "class": "tag " + (r.route || "knowledge") }, r.route || "knowledge")));
-        tr.appendChild(el("td", { "class": "num" }, fmt(r.hits)));
-        tr.appendChild(el("td", { "class": "num" }, fmt(r.actual_tokens)));
-        tr.appendChild(el("td", { "class": "num" }, fmt(r.baseline_tokens)));
-        tr.appendChild(el("td", { "class": "num" }, fmt(saved)));
-        body.appendChild(tr);
-      });
-    }).catch(function () {
-      setStatus(false);
-    }).then(function () { if (ok) setStatus(true); });
-
-    fetch("/stats").then(function (r) { return r.json(); }).then(function (d) {
-      var s = d.stats || {};
-      var sl = document.getElementById("stat-list").children;
-      var keys = ["knowledge", "code", "skill", "graph_nodes"];
-      keys.forEach(function (k, i) { if (sl[i]) sl[i].querySelector(".val").textContent = fmt(s[k]); });
+    fetch("/metrics").then(function (r) { return r.json(); }).then(function (d) {
+      renderApiCalls(d.api_calls || {});
+      renderDetail(d.recent || []);
     }).catch(function () {});
-  }
-
-  function setStatus(on) {
-    var dot = document.getElementById("status-dot");
-    var txt = document.getElementById("status-text");
-    dot.className = "dot" + (on ? "" : " off");
-    txt.textContent = on ? "服务在线 · 埋点实时监控中" : "服务离线";
   }
 
   refresh();

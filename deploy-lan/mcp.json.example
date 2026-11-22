@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "molbase": {
+      "command": "python",
+      "args": [
+        "C:/Users/Administrator/WorkBuddy/2026-11-17-22-17-16/molbase/molbase_mcp.py"
+      ],
+      "env": {
+        "MOLBASE_URL": "http://10.0.0.200:8787"
+      }
+    }
+  }
+}
