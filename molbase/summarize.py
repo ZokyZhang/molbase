@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import re
 
+from .config import LLM_MAX_CONTEXT_CHARS
+
 
 def split_sentences(text: str) -> list[str]:
     """按中文/英文句末标点、分号、换行切分句子，过滤空句。"""
@@ -309,9 +311,9 @@ def semantic_preserve(text: str, max_chars: int = 500, entry_id: str = "", llm=N
             return f"{cleaned_text}\n[原文: {entry_id}]"
         return cleaned_text
 
-    # 3. LLM 摘要
+    # 3. LLM 摘要（超长文本跳过 LLM，避免超上下文窗口被截断丢语义）
     summary = ""
-    if llm is not None:
+    if llm is not None and len(cleaned_text) <= LLM_MAX_CONTEXT_CHARS:
         try:
             system_prompt = _COMPACT_SYSTEM.format(max_chars=max_chars)
             summary = llm.chat(system_prompt, cleaned_text)

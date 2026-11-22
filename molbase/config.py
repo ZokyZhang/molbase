@@ -189,8 +189,13 @@ LLM_REWRITE = True
 
 # 本地 LLM 协议：ollama-native（Ollama 原生 /api/chat，自动关思考 think=false，
 # qwen 等思考模型必须用此协议，否则 reasoning 吞 token 导致正文为空/不压缩）|
-# openai（OpenAI 兼容 /v1/chat/completions，vLLM/llama.cpp 通用）。
+# openai（OpenAI 兼容 /v1/chat/completions，vLLM/llama.cpp/自建网关通用）。
 LLM_PROTOCOL = "ollama-native"
+
+# 摘要用 LLM 的输入长度上限（字符）：超过此长度的文本跳过 LLM 摘要，
+# 直接走去冗余兜底（保留原文 + 指针），避免超上下文窗口被截断丢语义。
+# 中文约 1 字 ≈ 1 token，12000 字远低于 qwen 32k 窗口，留足安全余量。
+LLM_MAX_CONTEXT_CHARS = 12000
 
 
 # ---------------------------------------------------------------------------
