@@ -32,6 +32,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -172,6 +174,33 @@ class KBRequestHandler(BaseHTTPRequestHandler):
         if path == "/writeback":
             limit = int(qs.get("limit", "10"))
             return self._ok({"writeback": self.orc.store.writeback_recent(limit=limit)})
+        if path == "/entries":
+            return self._handle_entries(qs)
+        if path == "/api/detail":
+            try:
+                metric = qs.get("metric", "token")
+                limit = min(int(qs.get("limit", "50")), 500)
+                offset = max(int(qs.get("offset", "0")), 0)
+                q = qs.get("q", "")
+                sort = qs.get("sort", "ts")
+                order = qs.get("order", "desc")
+                return self._ok(self.orc.metric_detail(metric, limit, offset, q, sort, order))
+            except (ValueError, TypeError):
+                return self._err(400, "Invalid parameters")
+        if path == "/api/alerts":
+            return self._ok(self.orc.alerts())
+        if path == "/api/alert-rules":
+            return self._ok(self.orc.alert_rules())
+        if path == "/api/trend":
+            try:
+                metric = qs.get("metric", "queries")
+                limit = min(int(qs.get("limit", "100")), 500)
+                since = float(qs["since"]) if "since" in qs else None
+                return self._ok({"metric": metric, "points": self.orc.store.list_snapshots(metric, limit, since)})
+            except (ValueError, TypeError, KeyError):
+                return self._err(400, "Invalid parameters")
+        if path == "/api/snapshot":
+            return self._ok({"ok": True, "values": self.orc.capture_snapshot()})
         if path in ("/", "/dashboard", "/index.html"):
             return self._serve_dashboard()
         return self._err(404, "not found")
@@ -188,6 +217,40 @@ class KBRequestHandler(BaseHTTPRequestHandler):
         except OSError:
             return self._err(500, "dashboard.html not found")
         return self._send_html(html)
+
+    def _handle_entries(self, qs: dict[str, str]) -> None:
+        """按 tags/type 列出知识条目（AND 过滤），供门户等应用做目录浏览。"""
+        tags = [t.strip() for t in qs.get("tags", "").split(",") if t.strip()]
+        entry_type = qs.get("type", "").strip()
+        try:
+            limit = int(qs.get("limit", "200"))
+        except ValueError:
+            limit = 200
+        out = []
+        for e in self.orc.store.all_entries():
+            if entry_type and e.entry_type != entry_type:
+                continue
+            etags = e.meta.get("tags") or []
+            if isinstance(etags, str):
+                etags = [etags]
+            etags = [str(t) for t in etags]
+            if tags and not all(t in etags for t in tags):
+                continue
+            content = sanitize_text(e.content) if SANITIZE_ENABLED else e.content
+            out.append({
+                "entry_id": e.entry_id,
+                "entry_type": e.entry_type,
+                "title": e.title,
+                "content": content,
+                "source": e.source,
+                "tags": etags,
+                "heat": e.heat,
+                "created_at": e.created_at,
+                "last_access": e.last_access,
+            })
+        out.sort(key=lambda x: (-(x["heat"] or 0.0), -x["last_access"]))
+        out = out[:limit]
+        self._ok({"entries": out, "total": len(out)})
 
     def do_POST(self) -> None:
         """POST：按路径路由到代工层各接口。"""
@@ -424,6 +487,16 @@ def create_server(
     return ThreadingHTTPServer((host, port), handler)
 
 
+def _snapshot_loop(orc, interval: int = 300) -> None:
+    # 后台定时采集指标快照（daemon 线程调用），每 interval 秒一次，异常不影响主服务。
+    while True:
+        try:
+            orc.capture_snapshot()
+        except Exception as e:
+            print(f"[molbase] 快照采集失败：{e}")
+        time.sleep(interval)
+# 在 main() 里服务启动后调用 threading.Thread(target=_snapshot_loop, args=(orc,), daemon=True).start() 即可启用
+
 def main() -> None:
     """命令行入口：python -m molbase.server [--host H] [--port P]。"""
     import argparse
@@ -435,6 +508,8 @@ def main() -> None:
 
     orc = Orchestrator()
     server = create_server(orc, host=args.host, port=args.port)
+    # 启动后台快照线程（每 5 分钟采集一次趋势数据，v4 新增）
+    threading.Thread(target=_snapshot_loop, args=(orc,), daemon=True).start()
     print(f"[molbase] 服务已启动: http://{args.host}:{args.port}")
     print(f"[molbase] 监控大屏:   http://{args.host}:{args.port}/  (数据源自知识库 /metrics + /stats)")
     print(f"[molbase] 鉴权: {'已启用' if server.RequestHandlerClass.auth_token else '未启用'}")

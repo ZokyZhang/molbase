@@ -1593,6 +1593,275 @@ class Orchestrator:
             },
         }
 
+    def metric_detail(self, metric: str, limit: int = 50, offset: int = 0, q: str = "", sort: str = "ts", order: str = "desc") -> dict:
+        """获取指定指标的详细信息"""
+        # 参数归一化
+        if not (1 <= limit <= 500):
+            limit = 50
+        if offset < 0:
+            offset = 0
+        if order != 'asc':
+            order = 'desc'
+
+        # 定义指标映射
+        metrics_map = {
+            'token': {
+                'summary_fn': lambda: self.store.metric_aggregate(),
+                'raw_fn': lambda: self.store.list_metrics(1000),
+                'filter_fields': ('query', 'route'),
+                'sort_fields': ('ts', 'actual_tokens', 'baseline_tokens', 'hits', 'confidence')
+            },
+            'flywheel': {
+                'summary_fn': lambda: {
+                    'queries': self.store.metric_aggregate()['queries'],
+                    'hits_total': self.store.metric_aggregate()['hits_total'],
+                    'feedback': self.store.feedback_aggregate(),
+                    'evolve': self.store.evolve_aggregate(),
+                    'auto_skills': sum(1 for e in self.store.all_entries() if e.entry_type == 'skill' and e.meta.get('auto_generated')),
+                    'intercept_rate': self.store.metric_aggregate()['intercept_rate'],
+                    'abstain_rate': self.store.metric_aggregate()['abstain_rate']
+                },
+                'raw_fn': lambda: self.store.list_metrics(1000),
+                'filter_fields': ('query', 'route'),
+                'sort_fields': ('ts', 'hits', 'confidence')
+            },
+            'abstain': {
+                'summary_fn': lambda: {k: v for k, v in self.store.abstain_aggregate(1000).items() if k != 'recent'},
+                'raw_fn': lambda: list({(r['query'], r['reason'], r['ts']): r for r in self.store.abstain_aggregate(1000)['recent'] + self.store.abstain_gaps(1000)}.values()),
+                'filter_fields': ('query', 'reason', 'subreason'),
+                'sort_fields': ('ts', 'confidence', 'top1_score')
+            },
+            'ingest': {
+                'summary_fn': lambda: self.store.ingest_aggregate(),
+                'raw_fn': lambda: self.store.list_ingest(500, 0),
+                'filter_fields': ('entry_id', 'state', 'title'),
+                'sort_fields': ('ts', 'state')
+            },
+            'writeback': {
+                'summary_fn': lambda: {'total': len(self.store.writeback_recent(1000))},
+                'raw_fn': lambda: self.store.writeback_recent(1000),
+                'filter_fields': ('type_cn', 'obj', 'state', 'detail'),
+                'sort_fields': ('ts',)
+            },
+            'participation': {
+                'summary_fn': lambda: {
+                    'total': len(self.store.session_participation(1000)),
+                    'evasion_counts': {
+                        k: sum(1 for r in self.store.session_participation(1000) if r.get('evasion') == k)
+                        for k in set(r.get('evasion') for r in self.store.session_participation(1000) if r.get('evasion'))
+                    }
+                },
+                'raw_fn': lambda: self.store.session_participation(1000),
+                'filter_fields': ('session_id', 'evasion'),
+                'sort_fields': ('query_count', 'abstain_count')
+            },
+            'sessions': {
+                'summary_fn': lambda: {'total': len(self.store.session_summary(1000))},
+                'raw_fn': lambda: self.store.session_summary(1000),
+                'filter_fields': ('session_id', 'missing'),
+                'sort_fields': ('query', 'feedback', 'harvest', 'tooltrace')
+            },
+            'catalog': {
+                'summary_fn': lambda: {**self.stats(), 'tag_count': len(self.store.tag_stats())},
+                'raw_fn': lambda: [{'entry_id': e.entry_id, 'entry_type': e.entry_type, 'title': e.title, 'source': e.source, 'heat': e.heat, 'created_at': e.created_at} for e in self.store.all_entries()],
+                'filter_fields': ('entry_id', 'title', 'entry_type'),
+                'sort_fields': ('created_at', 'heat', 'title')
+            },
+            'api': {
+                'summary_fn': lambda: self.store.api_calls_aggregate(),
+                'raw_fn': lambda: [dict(zip(['ts', 'api', 'is_test'], r)) for r in self.store._conn.cursor().execute("SELECT ts, api, is_test FROM api_calls ORDER BY id DESC LIMIT 1000").fetchall()],
+                'filter_fields': ('api',),
+                'sort_fields': ('ts', 'api')
+            }
+        }
+
+        # 未知 metric 回退到 token
+        if metric not in metrics_map:
+            metric = 'token'
+
+        cfg = metrics_map[metric]
+
+        # 获取原始数据和摘要
+        try:
+            summary = cfg['summary_fn']()
+            raw = cfg['raw_fn']()
+        except Exception:
+            summary = {}
+            raw = []
+
+        # 过滤
+        filtered = raw
+        if q:
+            q_lower = q.lower()
+            filtered = [
+                r for r in filtered
+                if any(
+                    q_lower in str(r.get(f, '')).lower()
+                    for f in cfg['filter_fields']
+                )
+            ]
+            # 特殊处理 missing 字段如果是 list
+            if 'missing' in cfg['filter_fields']:
+                filtered = [
+                    r for r in filtered
+                    if q_lower in str(''.join(r.get('missing', []) if isinstance(r.get('missing'), list) else r.get('missing', ''))).lower()
+                ]
+
+        # 排序
+        if sort not in cfg['sort_fields']:
+            sort = 'ts'
+        filtered = sorted(
+            filtered,
+            key=lambda r: r.get(sort) if r.get(sort) is not None else -1,
+            reverse=(order == 'desc')
+        )
+
+        # 分页
+        total = len(filtered)
+        items = filtered[offset:offset + limit]
+
+        return {
+            "metric": metric,
+            "summary": summary,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "items": items
+        }
+
+    def alert_rules(self) -> dict:
+        """返回告警规则定义"""
+        return {
+            "rules": [
+                {
+                    "key": "abstain_rate",
+                    "name": "弃答率",
+                    "op": ">",
+                    "threshold": 0.30,
+                    "unit": "ratio",
+                    "hint": "弃答率超30%，知识覆盖或阈值需整改"
+                },
+                {
+                    "key": "intercept_rate",
+                    "name": "拦截率",
+                    "op": "<",
+                    "threshold": 0.50,
+                    "unit": "ratio",
+                    "hint": "拦截率低于50%，命中质量偏低"
+                },
+                {
+                    "key": "saved_ratio",
+                    "name": "Token节省率",
+                    "op": "<",
+                    "threshold": 0.50,
+                    "unit": "ratio",
+                    "hint": "节省率低于50%，上下文收敛效果不足"
+                },
+                {
+                    "key": "evasion_sessions",
+                    "name": "逃票会话数",
+                    "op": ">",
+                    "threshold": 0,
+                    "unit": "count",
+                    "hint": "存在疑似逃票会话，需关注参与度"
+                }
+            ]
+        }
+
+    def alerts(self) -> dict:
+        """检查并返回触发的告警"""
+        try:
+            agg = self.store.metric_aggregate()
+            parts = self.store.session_participation(1000)
+            evasion_sessions = sum(
+                1 for r in parts
+                if r.get('evasion') in ('首次无返回即逃票', '未参与（有动作无查询）', '仅查1次（疑似逃票）')
+            )
+            values = {
+                'abstain_rate': agg['abstain_rate'],
+                'intercept_rate': agg['intercept_rate'],
+                'saved_ratio': agg['saved_ratio'],
+                'evasion_sessions': evasion_sessions
+            }
+            page = {
+                'abstain_rate': 'abstain',
+                'intercept_rate': 'flywheel',
+                'saved_ratio': 'token',
+                'evasion_sessions': 'participation'
+            }
+
+            rules = self.alert_rules()['rules']
+            fired = []
+            for rule in rules:
+                key = rule['key']
+                value = values.get(key, 0)
+                threshold = rule['threshold']
+                op = rule['op']
+
+                triggered = False
+                if op == '>':
+                    triggered = value > threshold
+                elif op == '<':
+                    triggered = value < threshold
+
+                if triggered:
+                    level = 'warn'
+                    if rule['unit'] == 'ratio' and abs(value - threshold) >= threshold * 0.5:
+                        level = 'critical'
+
+                    fired.append({
+                        'key': key,
+                        'name': rule['name'],
+                        'level': level,
+                        'value': round(value, 4),
+                        'threshold': threshold,
+                        'op': op,
+                        'hint': rule['hint'],
+                        'metric_page': page.get(key, '')
+                    })
+
+            return {
+                'checked_at': time.time(),
+                'total': len(rules),
+                'fired': len(fired),
+                'alerts': fired
+            }
+        except Exception:
+            return {
+                'checked_at': time.time(),
+                'total': 0,
+                'fired': 0,
+                'alerts': []
+            }
+
+    def capture_snapshot(self) -> dict:
+        """捕获当前指标快照"""
+        try:
+            agg = self.store.metric_aggregate()
+            calls = self.store.api_calls_aggregate()
+            st = self.stats()
+            rss = self.memory_usage()['rss_mb']
+
+            values = {
+                'queries': agg['queries'],
+                'saved_tokens': agg['saved_tokens'],
+                'saved_ratio': agg['saved_ratio'],
+                'intercept_rate': agg['intercept_rate'],
+                'abstain_rate': agg['abstain_rate'],
+                'hits_total': agg['hits_total'],
+                'api_total': calls['total'],
+                'knowledge': st['knowledge'],
+                'memory_mb': rss
+            }
+
+            for k, v in values.items():
+                self.store.record_snapshot(k, float(v))
+
+            self.store.prune_snapshots(30)
+            return values
+        except Exception:
+            return {}
+
     def close(self) -> None:
         """关闭底层存储连接，释放资源。"""
         self.store.close()

@@ -5,222 +5,658 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>MolBase · 知识库效能监控</title>
 <style>
-  :root {
-    --bg: #f4f6fb; --card: #ffffff; --ink: #1a1d24; --muted: #6b7280;
-    --brand: #2563eb; --save: #16a34a; --base: #94a3b8; --line: #e5e7eb;
-    --model: #7c3aed; --proxy: #0891b2; --warn: #d97706; --danger: #dc2626;
+:root {
+  --bg: #f4f6fb;
+  --card: #ffffff;
+  --ink: #1a1d24;
+  --muted: #6b7280;
+  --brand: #2563eb;
+  --save: #16a34a;
+  --base: #94a3b8;
+  --line: #e5e7eb;
+  --model: #7c3aed;
+  --proxy: #0891b2;
+  --warn: #d97706;
+  --danger: #dc2626;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  margin: 0;
+  padding: 0;
+  line-height: 1.5;
+}
+
+.topbar {
+  background: linear-gradient(135deg, #1e3a8a, #2563eb, #0891b2);
+  color: #fff;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 24px;
+}
+
+.topbar h1 {
+  font-size: 20px;
+  margin: 0;
+}
+
+.topbar .sub {
+  font-size: 12px;
+  opacity: 0.85;
+}
+
+.navtabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.navtab {
+  padding: 7px 14px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.14);
+  color: #fff;
+  cursor: pointer;
+  border: none;
+  font-size: 13px;
+}
+
+.navtab:hover {
+  background: rgba(255, 255, 255, 0.26);
+}
+
+.navtab.active {
+  background: #fff;
+  color: var(--brand);
+  font-weight: bold;
+}
+
+.badge {
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.16);
+  padding: 5px 12px;
+  font-size: 12px;
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #4ade80;
+  display: inline-block;
+}
+
+.dot.off {
+  background: #f87171;
+}
+
+.wrap {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 20px;
+}
+
+section {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 18px;
+  margin-bottom: 16px;
+}
+
+h2 {
+  font-size: 15px;
+  border-left: 3px solid var(--brand);
+  padding-left: 10px;
+  margin-bottom: 14px;
+  margin-top: 0;
+}
+
+.crumbs {
+  font-size: 13px;
+  color: var(--muted);
+  margin-bottom: 14px;
+}
+
+.crumbs a {
+  color: var(--brand);
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.page-title {
+  font-size: 20px;
+  font-weight: bold;
+  margin-bottom: 4px;
+}
+
+.page-desc {
+  font-size: 13px;
+  color: var(--muted);
+  margin-bottom: 18px;
+}
+
+.kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 14px;
+  margin-bottom: 16px;
+}
+
+.kpi {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 18px;
+  cursor: pointer;
+  transition: transform 0.15s, box-shadow 0.15s;
+}
+
+.kpi:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.08);
+}
+
+.kpi .k {
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 8px;
+}
+
+.kpi .v {
+  font-size: 28px;
+  font-weight: bold;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+}
+
+.kpi .u {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 6px;
+}
+
+.kpi .go {
+  font-size: 11px;
+  color: var(--brand);
+  margin-top: 8px;
+  display: block;
+}
+
+.kpi .v.green { color: var(--save); }
+.kpi .v.blue { color: var(--brand); }
+.kpi .v.purple { color: var(--model); }
+.kpi .v.warn { color: var(--warn); }
+.kpi .v.cyan { color: var(--proxy); }
+
+.bigbar {
+  height: 8px;
+  background: #eef1f6;
+  border-radius: 4px;
+  margin-top: 10px;
+  overflow: hidden;
+}
+
+.bigbar>i {
+  display: block;
+  height: 100%;
+  background: var(--save);
+}
+
+.wheel {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.step {
+  flex: 1;
+  min-width: 150px;
+  background: #fafbfc;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 14px;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+
+.step:hover {
+  border-color: var(--brand);
+}
+
+.step .sname {
+  font-size: 13px;
+  font-weight: bold;
+}
+
+.step .snum {
+  font-size: 24px;
+  font-weight: bold;
+  color: var(--brand);
+  margin: 6px 0;
+}
+
+.step .sdesc {
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.step.heat .snum { color: var(--warn); }
+.step.gen .snum { color: var(--save); }
+
+.warrow {
+  align-self: center;
+  color: var(--base);
+  font-size: 20px;
+  font-weight: bold;
+}
+
+.grid2 {
+  display: grid;
+  grid-template-columns: 1.6fr 1fr;
+  gap: 14px;
+}
+
+@media (max-width: 900px) {
+  .grid2 {
+    grid-template-columns: 1fr;
   }
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body {
-    background: var(--bg); color: var(--ink);
-    font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
-    font-size: 14px;
+  .kpi-grid {
+    grid-template-columns: repeat(2, 1fr);
   }
-  .topbar {
-    background: linear-gradient(135deg, #1e3a8a 0%, #2563eb 60%, #0891b2 100%);
-    color: #fff; padding: 16px 24px; display: flex; align-items: center;
-    justify-content: space-between; flex-wrap: wrap; gap: 12px;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th, td {
+  text-align: left;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+}
+
+th {
+  color: var(--muted);
+  background: #fafbfc;
+  font-size: 12px;
+}
+
+tr:last-child td {
+  border-bottom: none;
+}
+
+.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.pill {
+  border-radius: 10px;
+  padding: 1px 8px;
+  font-size: 11px;
+  font-weight: bold;
+  display: inline-block;
+}
+
+.pill.ok { background: #dcfce7; color: #15803d; }
+/* === 左右布局覆盖（v3）=== */
+html, body { height: 100%; }
+.layout { display: flex; min-height: 100vh; }
+.sidebar { width: 224px; flex: 0 0 224px; background: linear-gradient(180deg, #1e3a8a, #1d4ed8 55%, #0e7490); color: #fff; display: flex; flex-direction: column; padding: 0 0 12px; position: sticky; top: 0; height: 100vh; box-sizing: border-box; }
+.brand { padding: 22px 20px 14px; border-bottom: 1px solid rgba(255, 255, 255, .15); }
+.brand h1 { font-size: 20px; margin: 0 0 4px; letter-spacing: .5px; }
+.brand .sub { font-size: 12px; opacity: .8; }
+.side-status { margin: 14px 16px 6px; font-size: 12px; display: flex; align-items: center; gap: 7px; background: rgba(255, 255, 255, .12); border-radius: 20px; padding: 7px 12px; }
+.navtabs { display: flex; flex-direction: column; gap: 2px; margin-top: 10px; padding: 0 12px; overflow-y: auto; flex: 1; }
+.navtab { display: block; width: 100%; text-align: left; padding: 10px 14px; border-radius: 8px; background: transparent; color: rgba(255, 255, 255, .82); cursor: pointer; border: none; font-size: 13px; transition: background .15s, color .15s; }
+.navtab:hover { background: rgba(255, 255, 255, .16); color: #fff; }
+.navtab.active { background: #fff; color: var(--brand); font-weight: bold; box-shadow: 0 2px 8px rgba(0, 0, 0, .12); }
+.side-foot { font-size: 11px; opacity: .65; text-align: center; padding: 10px 0 0; }
+.main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.wrap { max-width: none; width: 100%; margin: 0; padding: 22px 28px; flex: 1; }
+.foot { padding: 14px 28px; font-size: 11px; color: var(--muted); border-top: 1px solid var(--line); background: #fff; }
+.topbar { display: none; }
+@media (max-width: 820px) { .layout { flex-direction: column; } .sidebar { width: 100%; flex: none; height: auto; position: static; } .navtabs { flex-direction: row; flex-wrap: wrap; } .navtab { width: auto; } .side-foot { display: none; } .wrap { padding: 16px; } }
+.pill.miss { background: #fee2e2; color: #b91c1c; }
+
+
+/* === v4 监控增强 === */
+#alert-bar {
+  margin-bottom: 14px;
+}
+
+.alert-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border-radius: 8px;
+  margin-right: 8px;
+  margin-bottom: 8px;
+  font-size: 12px;
+  cursor: pointer;
+  border: 1px solid;
+}
+
+.alert-item.warn {
+  background: #fffbeb;
+  border-color: #fcd34d;
+  color: #92400e;
+}
+
+.alert-item.critical {
+  background: #fef2f2;
+  border-color: #fca5a5;
+  color: #991b1b;
+  animation: alertPulse 2s infinite;
+}
+
+@keyframes alertPulse {
+  0% { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.4); }
+  70% { box-shadow: 0 0 0 6px rgba(220, 38, 38, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0); }
+}
+
+.alert-item b {
+  font-weight: 700;
+}
+
+.alert-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #ef4444;
+  margin-left: 6px;
+  vertical-align: middle;
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.2);
+}
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  background: #fafbfc;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.toolbar input.search,
+.toolbar select {
+  padding: 6px 10px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  font-size: 12px;
+  outline: none;
+}
+
+.toolbar input.search:focus,
+.toolbar select:focus {
+  border-color: var(--brand);
+}
+
+.toolbar button {
+  padding: 6px 12px;
+  border: 1px solid #d1d5db;
+  background: #fff;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.toolbar button:hover {
+  background: #f3f4f6;
+}
+
+.toolbar button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.toolbar .pageinfo {
+  font-size: 12px;
+  color: var(--muted);
+  margin-left: auto;
+}
+
+.summary-cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.summary-card {
+  background: #f8fafc;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 14px;
+  min-width: 110px;
+}
+
+.summary-card .k {
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+
+.summary-card .v {
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--brand);
+  font-variant-numeric: tabular-nums;
+}
+
+.chart-box {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px;
+  margin-bottom: 16px;
+}
+
+.chart-box h3 {
+  font-size: 13px;
+  margin: 0 0 8px;
+  color: var(--ink);
+}
+
+.chart-box canvas {
+  width: 100%;
+  display: block;
+}
+
+.trend-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.trend-cell {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px;
+  text-align: center;
+}
+
+.trend-cell .t {
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+
+.trend-cell canvas {
+  width: 100%;
+  height: 50px;
+}
+
+#trend-main {
+  height: 200px;
+}
+
+@media (max-width: 900px) {
+  .trend-grid {
+    grid-template-columns: repeat(2, 1fr);
   }
-  .topbar h1 { font-size: 20px; font-weight: 700; letter-spacing: .5px; }
-  .topbar .sub { font-size: 12px; opacity: .85; margin-top: 2px; }
-  .badge { display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px;
-    border-radius: 20px; font-size: 12px; font-weight: 600; background: rgba(255,255,255,.16); }
-  .dot { width: 8px; height: 8px; border-radius: 50%; background: #4ade80; }
-  .dot.off { background: #f87171; }
-  .wrap { max-width: 1180px; margin: 0 auto; padding: 20px; }
-  section { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 18px; }
-  h2 { font-size: 15px; margin-bottom: 14px; padding-left: 10px; border-left: 3px solid var(--brand); font-weight: 600; }
+}
 
-  /* 1. Token 大卡 */
-  .token-cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 16px; }
-  .tcard { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 18px; }
-  .tcard .k { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
-  .tcard .v { font-size: 28px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.1; }
-  .tcard .v.green { color: var(--save); }
-  .tcard .v.blue { color: var(--brand); }
-  .tcard .v.purple { color: var(--model); }
-  .tcard .u { font-size: 11px; color: var(--muted); margin-top: 6px; }
-  .tcard .bigbar { height: 8px; background: #eef1f6; border-radius: 4px; margin-top: 10px; overflow: hidden; }
-  .tcard .bigbar > i { display: block; height: 100%; background: var(--save); border-radius: 4px; }
+.pill.miss {
+  background: #fee2e2;
+  color: #b91c1c;
+  border-radius: 10px;
+  padding: 1px 8px;
+  font-size: 11px;
+  font-weight: 700;
+  display: inline-block;
+}
 
-  /* 2. 飞轮 */
-  .flywheel { margin-bottom: 16px; }
-  .wheel { display: flex; align-items: stretch; gap: 8px; flex-wrap: wrap; }
-  .step { flex: 1; min-width: 150px; background: #fafbfc; border: 1px solid var(--line);
-    border-radius: 12px; padding: 14px; text-align: center; }
-  .step .sname { font-size: 13px; font-weight: 600; color: var(--ink); }
-  .step .snum { font-size: 24px; font-weight: 700; color: var(--brand); margin: 6px 0 2px;
-    font-variant-numeric: tabular-nums; }
-  .step .sdesc { font-size: 11px; color: var(--muted); line-height: 1.5; }
-  .step.heat .snum { color: var(--warn); }
-  .step.gen .snum { color: var(--save); }
-  .warrow { align-self: center; color: var(--base); font-size: 20px; font-weight: 700; }
-
-  /* 3. 两列 */
-  .grid2 { display: grid; grid-template-columns: 1.6fr 1fr; gap: 14px; margin-bottom: 16px; }
-  @media (max-width: 900px) { .grid2 { grid-template-columns: 1fr; } .token-cards { grid-template-columns: repeat(2, 1fr); } }
-
-  /* 标签条形图 */
-  .tagbar { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
-  .tagbar .tname { width: 64px; font-size: 12px; color: var(--muted); text-align: right; flex-shrink: 0; }
-  .tagbar .tbar { flex: 1; height: 16px; background: #eef1f6; border-radius: 4px; overflow: hidden; }
-  .tagbar .tbar > i { display: block; height: 100%; background: var(--brand); border-radius: 4px; }
-  .tagbar .tval { width: 40px; font-size: 12px; color: var(--ink); font-variant-numeric: tabular-nums; }
-
-  /* 通用表格 / 列表 */
-  table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); }
-  th { color: var(--muted); font-weight: 600; background: #fafbfc; font-size: 12px; }
-  tr:last-child td { border-bottom: none; }
-  .num { text-align: right; font-variant-numeric: tabular-nums; }
-  .pill { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
-  .pill.ok { background: #dcfce7; color: #15803d; }
-  .pill.miss { background: #fee2e2; color: #b91c1c; }
-  .pill.st { background: #e0f2fe; color: #0369a1; }
-  .pill.new { background: #dcfce7; color: #15803d; }
-  .pill.merge { background: #e0f2fe; color: #0369a1; }
-  .pill.dup { background: #fef3c7; color: #92400e; }
-  .pill.conflict { background: #fee2e2; color: #b91c1c; }
-  .pill.pinned { background: #f3e8ff; color: #6d28d9; }
-  .stat-list { list-style: none; }
-  .stat-list li { display: flex; justify-content: space-between; padding: 9px 0; border-bottom: 1px solid var(--line); }
-  .stat-list li:last-child { border-bottom: none; }
-  .stat-list .label { color: var(--muted); }
-  .stat-list .val { font-weight: 700; font-variant-numeric: tabular-nums; }
-  .empty { color: var(--muted); text-align: center; padding: 24px 0; }
-  .foot { color: var(--muted); font-size: 12px; text-align: center; padding: 8px 0 24px; }
-  .tag { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11px; }
-  .tag.knowledge { background: #e0f2fe; color: #0369a1; }
-  .tag.code { background: #f3e8ff; color: var(--model); }
-  .tag.skill { background: #ecfeff; color: var(--proxy); }
-  .tag.test { background: #fef3c7; color: #92400e; }
-
-  /* 5. 弃答归因 */
-  .abstain { margin-bottom: 16px; }
-  .abstain-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 14px; }
-  .acard { background: #fafbfc; border: 1px solid var(--line); border-radius: 12px; padding: 14px; }
-  .acard .aname { font-size: 13px; font-weight: 600; margin-bottom: 4px; }
-  .acard .anum { font-size: 22px; font-weight: 700; margin: 6px 0 2px; font-variant-numeric: tabular-nums; }
-  .acard .afix { font-size: 12px; color: var(--muted); line-height: 1.5; }
-  @media (max-width: 900px) { .abstain-cards { grid-template-columns: 1fr; } }
-  .pill.nodata { background: #fee2e2; color: #b91c1c; }
-  .pill.weak { background: #fef3c7; color: #92400e; }
-  .pill.ambig { background: #e0f2fe; color: #0369a1; }
-
-  /* 6. 回写明细 */
-  .writeback { margin-bottom: 16px; }
-  .pill.wb-ingest { background: #dcfce7; color: #15803d; }
-  .pill.wb-harvest { background: #f3e8ff; color: #6d28d9; }
-  .pill.wb-feedback { background: #e0f2fe; color: #0369a1; }
-  .pill.wb-evolve { background: #ede9fe; color: #5b21b6; }
-  .pill.wb-tooltrace { background: #fef3c7; color: #92400e; }
-
-  /* 7. 会话参与度 */
-  .participation { margin-bottom: 16px; }
+.pill.ok {
+  background: #dcfce7;
+  color: #15803d;
+  border-radius: 10px;
+  padding: 1px 8px;
+  font-size: 11px;
+  font-weight: 700;
+  display: inline-block;
+}
 </style>
 </head>
-<body>
-<div class="topbar">
-  <div>
-    <h1>MolBase · 知识库效能监控</h1>
-    <div class="sub">token 节省 · 飞轮运转 · 入库与会话链路 · 知识库本体 · 数据源自 /overview</div>
-  </div>
-  <div class="badge"><span class="dot" id="status-dot"></span><span id="status-text">连接中…</span></div>
+<body><div class="layout">
+  <aside class="sidebar">
+    <div class="brand"><h1>MolBase</h1><div class="sub">知识库效能监控</div></div>
+    <div class="side-status badge"><span class="dot" id="status-dot"></span><span id="status-text">连接中…</span></div>
+    <nav class="navtabs">
+      <button class="navtab" data-route="home">首页概览</button>
+      <button class="navtab" data-route="token">Token 效能</button>
+      <button class="navtab" data-route="flywheel">飞轮运转</button>
+      <button class="navtab" data-route="abstain">弃答归因</button>
+      <button class="navtab" data-route="ingest">入库分布</button>
+      <button class="navtab" data-route="writeback">回写明细</button>
+      <button class="navtab" data-route="participation">会话参与</button>
+      <button class="navtab" data-route="sessions">会话链路</button>
+      <button class="navtab" data-route="catalog">知识库本体</button>
+      <button class="navtab" data-route="api">接口调用</button>
+      <button class="navtab" data-route="detail">查询明细</button>
+    </nav>
+    <div class="side-foot">实时数据 · 每 3 秒刷新</div>
+  </aside>
+  <main class="main">
+    <div class="wrap">
+      <div class="page" id="page-home">
+        <div class="page-title">效能总览</div>
+        <div class="page-desc">点击任意指标卡片可下钻查看完整明细 · 数据每 3 秒自动刷新</div>
+        <div id="alert-bar"></div>
+        <div class="kpi-grid" id="home-kpi"></div>
+        <section class="chart-box">
+          <h2>实时趋势 <select id="trend-select" style="margin-left:10px;font-size:12px;padding:4px 8px;border:1px solid #d1d5db;border-radius:6px;">
+            <option value="queries">查询量</option>
+            <option value="saved_tokens">节省 Token</option>
+            <option value="saved_ratio">节省率</option>
+            <option value="intercept_rate">拦截率</option>
+            <option value="abstain_rate">弃答率</option>
+            <option value="api_total">接口调用</option>
+            <option value="knowledge">知识条目</option>
+          </select></h2>
+          <canvas id="trend-main"></canvas>
+        </section>
+        <section>
+          <h2>指标走势（近 20 个采样点）</h2>
+          <div class="trend-grid">
+            <div class="trend-cell"><div class="t">查询量</div><canvas id="spark-queries"></canvas></div>
+            <div class="trend-cell"><div class="t">节省率</div><canvas id="spark-saved_ratio"></canvas></div>
+            <div class="trend-cell"><div class="t">拦截率</div><canvas id="spark-intercept_rate"></canvas></div>
+            <div class="trend-cell"><div class="t">弃答率</div><canvas id="spark-abstain_rate"></canvas></div>
+            <div class="trend-cell"><div class="t">节省 Token</div><canvas id="spark-saved_tokens"></canvas></div>
+            <div class="trend-cell"><div class="t">接口调用</div><canvas id="spark-api_total"></canvas></div>
+          </div>
+        </section>
+        <section><h2>飞轮运转（点击环节下钻）</h2><div class="wheel" id="wheel"></div></section>
+        <section><h2>快速入口</h2><div class="kpi-grid" id="home-links"></div></section>
+      </div>
+      <div class="page" id="page-token" style="display:none">
+        <div class="crumbs"><a data-route="home">首页</a> / <span class="cur">Token 效能</span></div>
+        <div class="page-title">Token 效能</div>
+        <div class="page-desc">监控 Token 消耗趋势与节省率</div>
+        <div id="body-token"></div>
+      </div>
+      <div class="page" id="page-flywheel" style="display:none">
+        <div class="crumbs"><a data-route="home">首页</a> / <span class="cur">飞轮运转</span></div>
+        <div class="page-title">飞轮运转</div>
+        <div class="page-desc">各环节流转效率与瓶颈分析</div>
+        <div id="body-flywheel"></div>
+      </div>
+      <div class="page" id="page-abstain" style="display:none">
+        <div class="crumbs"><a data-route="home">首页</a> / <span class="cur">弃答归因</span></div>
+        <div class="page-title">弃答归因</div>
+        <div class="page-desc">模型拒绝回答的原因分布</div>
+        <div id="body-abstain"></div>
+      </div>
+      <div class="page" id="page-ingest" style="display:none">
+        <div class="crumbs"><a data-route="home">首页</a> / <span class="cur">入库分布</span></div>
+        <div class="page-title">入库分布</div>
+        <div class="page-desc">知识库文档来源与入库状态</div>
+        <div id="body-ingest"></div>
+      </div>
+      <div class="page" id="page-writeback" style="display:none">
+        <div class="crumbs"><a data-route="home">首页</a> / <span class="cur">回写明细</span></div>
+        <div class="page-title">回写明细</div>
+        <div class="page-desc">用户反馈回写知识库的详细记录</div>
+        <div id="body-writeback"></div>
+      </div>
+      <div class="page" id="page-participation" style="display:none">
+        <div class="crumbs"><a data-route="home">首页</a> / <span class="cur">会话参与</span></div>
+        <div class="page-title">会话参与度</div>
+        <div class="page-desc">用户与知识库交互的深度分析</div>
+        <div id="body-participation"></div>
+      </div>
+      <div class="page" id="page-sessions" style="display:none">
+        <div class="crumbs"><a data-route="home">首页</a> / <span class="cur">会话链路</span></div>
+        <div class="page-title">会话链路</div>
+        <div class="page-desc">完整会话流程与上下文追踪</div>
+        <div id="body-sessions"></div>
+      </div>
+      <div class="page" id="page-catalog" style="display:none">
+        <div class="crumbs"><a data-route="home">首页</a> / <span class="cur">知识库本体</span></div>
+        <div class="page-title">知识库本体</div>
+        <div class="page-desc">知识库结构、标签与元数据概览</div>
+        <div id="body-catalog"></div>
+      </div>
+      <div class="page" id="page-api" style="display:none">
+        <div class="crumbs"><a data-route="home">首页</a> / <span class="cur">接口调用</span></div>
+        <div class="page-title">接口调用</div>
+        <div class="page-desc">API 请求量、响应时间与错误率</div>
+        <div id="body-api"></div>
+      </div>
+      <div class="page" id="page-detail" style="display:none">
+        <div class="crumbs"><a data-route="home">首页</a> / <span class="cur">最近查询明细</span></div>
+        <div class="page-title">最近查询明细</div>
+        <div class="page-desc">实时查询日志与用户行为记录</div>
+        <div id="body-detail"></div>
+      </div>
+    </div>
+    <div class="foot">数据每 3 秒自动刷新 · 趋势每 5 分钟快照 · token 为粗估值（中文 1 字≈1 token，英文 4 字符≈1 token）· 环节日志自改版起累计</div>
+  </main>
 </div>
-
-<div class="wrap">
-  <!-- ① Token 消耗与节省（直观大卡） -->
-  <div class="token-cards">
-    <div class="tcard"><div class="k">累计消耗 token（实际返回）</div><div class="v blue" id="t-actual">-</div><div class="u">大模型真实吃进的上下文</div></div>
-    <div class="tcard"><div class="k">累计节省 token</div><div class="v green" id="t-saved">-</div><div class="u">召回候选 → 最小上下文的收敛</div></div>
-    <div class="tcard"><div class="k">节省率</div><div class="v green" id="t-ratio">-</div><div class="bigbar"><i id="t-ratio-bar" style="width:0%"></i></div><div class="u">越高越省</div></div>
-    <div class="tcard"><div class="k">等效降本（按输入单价 ¥2/百万）</div><div class="v purple" id="t-cost">-</div><div class="u">若上云等效节省金额</div></div>
-  </div>
-
-  <!-- ② 飞轮运转 -->
-  <section class="flywheel">
-    <h2>飞轮运转（查询 → 命中 → 反馈 → 进化 → 更准）</h2>
-    <div class="wheel" id="wheel"></div>
-  </section>
-
-  <!-- ②-1 弃答归因（为什么拦截 · 怎么整改） -->
-  <section class="abstain">
-    <h2>弃答归因（为什么拦截 · 怎么整改）</h2>
-    <div class="abstain-cards" id="abstain-cards"></div>
-    <table>
-      <thead><tr><th>最近弃答查询（缺口）</th><th>归因</th><th class="num">候选数</th><th class="num">置信度</th><th>整改建议</th></tr></thead>
-      <tbody id="abstain-body"><tr><td colspan="5" class="empty">暂无弃答记录（出现 abstain 后累计）</td></tr></tbody>
-    </table>
-  </section>
-
-  <!-- ②-2 回写明细（密切关注数据回写） -->
-  <section class="writeback">
-    <h2>回写明细（最近 10 条写库动作 · 入库 / 会话回写 / 反馈 / 进化 / 工具轨迹）</h2>
-    <table>
-      <thead><tr><th>时间</th><th>类型</th><th>对象</th><th>状态 / 动作</th><th>摘要</th></tr></thead>
-      <tbody id="writeback-body"><tr><td colspan="5" class="empty">暂无回写记录（入库/反馈/进化/轨迹发生后累计）</td></tr></tbody>
-    </table>
-  </section>
-
-  <!-- ②-3 会话参与度（每个会话参与几次 · 是否逃票） -->
-  <section class="participation">
-    <h2>会话参与度（每个会话 MolBase 参与几次 · 是否带标签逃票）</h2>
-    <table>
-      <thead><tr><th>会话</th><th class="num">参与次数</th><th class="num">命中</th><th class="num">弃答</th><th>首次查询</th><th>逃票判定</th></tr></thead>
-      <tbody id="participation-body"><tr><td colspan="6" class="empty">暂无会话参与数据（query 归集到会话后出现）</td></tr></tbody>
-    </table>
-  </section>
-
-  <!-- ③ 入库明细 + 会话链路 / 知识库本体 -->
-  <div class="grid2">
-    <section>
-      <h2>入库情况（有没有入 · 入成什么样）</h2>
-      <div id="ingest-box"></div>
-      <h2 style="margin-top:16px;">会话链路（每会话走了哪几步 · 缺哪步）</h2>
-      <table>
-        <thead><tr><th>会话</th><th class="num">查询</th><th class="num">反馈</th><th class="num">沉淀</th><th class="num">轨迹</th><th>缺失步骤</th></tr></thead>
-        <tbody id="session-body"><tr><td colspan="6" class="empty">暂无会话数据（query/feedback 传 session_id 后出现）</td></tr></tbody>
-      </table>
-    </section>
-    <section>
-      <h2>知识库本体</h2>
-      <ul class="stat-list" id="catalog-list">
-        <li><span class="label">知识条目</span><span class="val">-</span></li>
-        <li><span class="label">代码符号</span><span class="val">-</span></li>
-        <li><span class="label">技能包</span><span class="val">-</span></li>
-        <li><span class="label">关联图节点</span><span class="val">-</span></li>
-        <li><span class="label">运行内存（RSS）</span><span class="val">-</span></li>
-      </ul>
-      <h2 style="margin-top:16px;">标签分布（各分类条数）</h2>
-      <div id="tag-box"><div class="empty">暂无标签数据</div></div>
-    </section>
-  </div>
-
-  <!-- ④ 接口调用 + 明细 -->
-  <div class="grid2">
-    <section>
-      <h2>接口调用率</h2>
-      <table>
-        <thead><tr><th>接口</th><th class="num">调用次数</th><th>占比</th></tr></thead>
-        <tbody id="apicall-body"><tr><td colspan="3" class="empty">暂无调用数据</td></tr></tbody>
-      </table>
-    </section>
-    <section>
-      <h2>最近查询明细</h2>
-      <table>
-        <thead><tr><th>时间</th><th>查询</th><th class="num">命中</th><th class="num">实际</th><th class="num">基线</th></tr></thead>
-        <tbody id="detail-body"><tr><td colspan="5" class="empty">暂无数据</td></tr></tbody>
-      </table>
-    </section>
-  </div>
-
-  <div class="foot">数据每 3 秒自动刷新 · token 为粗估值（中文 1 字≈1 token，英文 4 字符≈1 token）· 环节日志（反馈/入库/进化/会话）自本次改版起累计</div>
-</div>
-
 <script>
-(function () {
-  "use strict";
-  var REFRESH_MS = 3000;
+(function() {
+"use strict";
 
   function el(tag, attrs, child) {
     var n = document.createElement(tag);
@@ -232,12 +668,15 @@
     return n;
   }
   function fmt(n) { return (n == null || n === "") ? "-" : Number(n).toLocaleString("en-US"); }
+  function pct(x) { return (x == null) ? "-" : (x * 100).toFixed(1) + "%"; }
   function tsTime(ts) {
+    if (!ts) return "-";
     var d = new Date(ts * 1000);
     function p(n) { return (n < 10 ? "0" : "") + n; }
     return p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds());
   }
   function tsFull(ts) {
+    if (!ts) return "-";
     var d = new Date(ts * 1000);
     function p(n) { return (n < 10 ? "0" : "") + n; }
     return p(d.getMonth() + 1) + "-" + p(d.getDate()) + " " + p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds());
@@ -247,276 +686,825 @@
     document.getElementById("status-text").textContent = on ? "服务在线 · 实时监控中" : "服务离线";
   }
 
-  // 渲染飞轮
-  function renderWheel(fw) {
-    var host = document.getElementById("wheel");
-    host.innerHTML = "";
+var state={overview:null,metrics:null};var ROUTES=['home','token','flywheel','abstain','ingest','writeback','participation','sessions','catalog','api','detail'];function go(route){location.hash='#/'+route;}function currentRoute(){var h=location.hash.replace('#/','');return ROUTES.indexOf(h)>-1?h:'home';}function navigate(){var cur=currentRoute();document.querySelectorAll('.navtab').forEach(function(t){if(t.getAttribute('data-route')===cur)t.classList.add('active');else t.classList.remove('active');});document.querySelectorAll('.page').forEach(function(p){p.style.display=(p.id==='page-'+cur)?'':'none';});renderCurrent();}function renderStub(route){var c=document.getElementById('body-'+route);if(c)c.innerHTML='<div class="empty">该模块渲染中…</div>';}function refresh(){Promise.all([fetch('/overview').then(function(r){return r.json();}),fetch('/metrics').then(function(r){return r.json();})]).then(function(res){state.overview=res[0];state.metrics=res[1];setStatus(true);renderCurrent();}).catch(function(){setStatus(false);});}function renderCurrent(){if(!state.overview)return;var r=currentRoute();if(r==='home')renderHome();else if(r==='token')renderToken();else if(r==='flywheel')renderFlywheel();else if(r==='abstain'&&typeof renderAbstain==='function')renderAbstain();else if(r==='ingest'&&typeof renderIngest==='function')renderIngest();else if(r==='writeback'&&typeof renderWriteback==='function')renderWriteback();else if(r==='participation'&&typeof renderParticipation==='function')renderParticipation();else if(r==='sessions'&&typeof renderSessions==='function')renderSessions();else if(r==='catalog'&&typeof renderCatalog==='function')renderCatalog();else if(r==='api'&&typeof renderApi==='function')renderApi();else if(r==='detail'&&typeof renderDetail==='function')renderDetail();else renderStub(r);}
+/**
+ * 渲染首页概览
+ */
+function renderHome() {
+    var o = state.overview;
+    var m = state.metrics;
+    var kpiHtml = '';
+
+    // 1. 累计节省 token
+    kpiHtml += '<div class="kpi" onclick="go(\'token\')">' +
+        '<div class="k">累计节省 Token</div>' +
+        '<div class="v" style="color:#16a34a">' + fmt(o.token.saved_tokens) + '</div>' +
+        '<div class="u">节省率 ' + pct(o.token.saved_ratio) + '</div>' +
+        '<div class="go">查看详情 →</div></div>';
+
+    // 2. 飞轮查询
+    kpiHtml += '<div class="kpi" onclick="go(\'flywheel\')">' +
+        '<div class="k">飞轮查询</div>' +
+        '<div class="v" style="color:#2563eb">' + fmt(o.flywheel.queries) + '</div>' +
+        '<div class="u">命中 ' + fmt(o.flywheel.hits_total) + ' · 拦截率 ' + pct(o.flywheel.intercept_rate) + '</div>' +
+        '<div class="go">查看详情 →</div></div>';
+
+    // 3. 弃答缺口
+    // 注意：根据背景数据定义，o.abstain 可能不存在或结构不同，这里假设 o.abstain 存在且符合描述结构，若实际数据无此字段需调整
+    var abstainTotal = o.abstain ? o.abstain.total : 0;
+    var noData = o.abstain && o.abstain.by_reason ? (o.abstain.by_reason.no_data || 0) : 0;
+    var weakMatch = o.abstain && o.abstain.by_reason ? (o.abstain.by_reason.weak_match || 0) : 0;
+    
+    kpiHtml += '<div class="kpi" onclick="go(\'abstain\')">' +
+        '<div class="k">弃答缺口</div>' +
+        '<div class="v" style="color:#d97706">' + fmt(abstainTotal) + '</div>' +
+        '<div class="u">没数据 ' + noData + ' · 弱相关 ' + weakMatch + '</div>' +
+        '<div class="go">查看详情 →</div></div>';
+
+    // 4. 回写动作
+    kpiHtml += '<div class="kpi" onclick="go(\'writeback\')">' +
+        '<div class="k">回写动作</div>' +
+        '<div class="v" style="color:#7c3aed">' + o.writeback.length + '</div>' +
+        '<div class="u">最近入库/反馈/进化/轨迹</div>' +
+        '<div class="go">查看详情 →</div></div>';
+
+    // 5. 接口调用
+    // 注意：背景数据定义中 state.metrics 无 api_calls 字段，此处按题目要求强行读取，若实际无数据将显示 '-'
+    var apiTotal = m.api_calls && m.api_calls.total ? m.api_calls.total : 0;
+    var apiCount = m.api_calls && m.api_calls.by_api ? Object.keys(m.api_calls.by_api).length : 0;
+
+    kpiHtml += '<div class="kpi" onclick="go(\'api\')">' +
+        '<div class="k">接口调用</div>' +
+        '<div class="v" style="color:#0891b2">' + fmt(apiTotal) + '</div>' +
+        '<div class="u">' + apiCount + ' 类接口</div>' +
+        '<div class="go">查看详情 →</div></div>';
+
+    // 6. 知识条目
+    var knowledge = o.catalog && o.catalog.knowledge ? o.catalog.knowledge : 0;
+    var code = o.catalog && o.catalog.code ? o.catalog.code : 0;
+    var skill = o.catalog && o.catalog.skill ? o.catalog.skill : 0;
+
+    kpiHtml += '<div class="kpi" onclick="go(\'catalog\')">' +
+        '<div class="k">知识条目</div>' +
+        '<div class="v" style="color:#2563eb">' + fmt(knowledge) + '</div>' +
+        '<div class="u">代码 ' + fmt(code) + ' · skill ' + fmt(skill) + '</div>' +
+        '<div class="go">查看详情 →</div></div>';
+
+    document.getElementById('home-kpi').innerHTML = kpiHtml;
+
+    // 渲染跳转链接
+    var linksHtml = '';
+    var links = [
+        { title: '查询明细', route: 'detail' },
+        { title: '会话链路', route: 'sessions' },
+        { title: '入库分布', route: 'ingest' },
+        { title: '接口调用', route: 'api' }
+    ];
+
+    links.forEach(function(link) {
+        linksHtml += '<div class="kpi" onclick="go(\'' + link.route + '\')">' +
+            '<div class="k">' + link.title + '</div>' +
+            '<div class="go">进入 →</div></div>';
+    });
+    document.getElementById('home-links').innerHTML = linksHtml;
+
+    // 渲染飞轮
+    renderWheel(o.flywheel, 'wheel');
+}
+
+/**
+ * 渲染飞轮步骤
+ * @param {Object} fw - 飞轮数据对象
+ * @param {String} targetId - 目标容器ID
+ */
+function renderWheel(fw, targetId) {
+    var el = document.getElementById(targetId || 'wheel');
+    if (!el) return;
+
     var steps = [
-      { name: "查询", num: fmt(fw.queries), desc: "次检索（驱动一切）", cls: "" },
-      { name: "命中", num: fmt(fw.hits_total), desc: "累计命中条目", cls: "heat" },
-      { name: "反馈", num: fmt((fw.feedback && fw.feedback.total) || 0), desc: describeFeedback(fw.feedback), cls: "" },
-      { name: "进化", num: fmt((fw.evolve && fw.evolve.steps) || 0), desc: describeEvolve(fw.evolve), cls: "" },
-      { name: "更准", num: fmt(fw.auto_skills), desc: "自动固化 skill · 拦截率 " + pct(fw.intercept_rate), cls: "gen" },
+        { name: '查询', num: fmt(fw.queries), desc: '次检索', route: 'detail' },
+        { name: '命中', num: fmt(fw.hits_total), desc: '累计命中', route: 'token' },
+        { name: '反馈', num: fmt((fw.feedback && fw.feedback.total) || 0), desc: '反馈动作', route: 'writeback' },
+        { name: '进化', num: fmt((fw.evolve && fw.evolve.steps) || 0), desc: '建边 ' + fmt((fw.evolve && fw.evolve.added_edges) || 0), route: 'flywheel' },
+        { name: '更准', num: fmt(fw.auto_skills), desc: '拦截率 ' + pct(fw.intercept_rate), route: 'api' }
     ];
-    steps.forEach(function (s, i) {
-      if (i > 0) host.appendChild(el("div", { "class": "warrow" }, "→"));
-      var d = el("div", { "class": "step " + s.cls });
-      d.appendChild(el("div", { "class": "sname" }, s.name));
-      d.appendChild(el("div", { "class": "snum" }, s.num));
-      d.appendChild(el("div", { "class": "sdesc" }, s.desc));
-      host.appendChild(d);
-    });
-  }
-  function describeFeedback(fb) {
-    if (!fb || !fb.total) return "尚无反馈动作";
-    var by = fb.by_action || {};
-    var parts = [];
-    for (var k in by) parts.push(k + " " + by[k]);
-    return parts.join(" · ");
-  }
-  function describeEvolve(ev) {
-    if (!ev) return "尚无进化步进";
-    return "建边 " + fmt(ev.added_edges) + " · 衰减 " + fmt(ev.decayed) + " · 归档 " + fmt(ev.archived);
-  }
-  function pct(x) { return (x == null) ? "-" : (x * 100).toFixed(1) + "%"; }
 
-  // 渲染入库分布
-  function renderIngest(ig) {
-    var host = document.getElementById("ingest-box");
-    host.innerHTML = "";
-    var by = (ig && ig.by_state) || {};
-    var keys = Object.keys(by);
-    if (!keys.length) {
-      host.appendChild(el("div", { "class": "empty" }, "暂无入库记录（调用 /ingest/knowledge 后出现）"));
+    var html = '';
+    steps.forEach(function(step, i) {
+        if (i > 0) {
+            html += '<div class="warrow">→</div>';
+        }
+        
+        // 命中(索引1)用heat，更准(索引4)用gen，其他默认
+        var cls = 'step';
+        if (i === 1) cls += ' heat';
+        if (i === 4) cls += ' gen';
+
+        html += '<div class="' + cls + '" onclick="go(\'' + step.route + '\')">' +
+            '<div class="sname">' + step.name + '</div>' +
+            '<div class="snum">' + step.num + '</div>' +
+            '<div class="sdesc">' + step.desc + '</div>' +
+            '</div>';
+    });
+
+    el.innerHTML = html;
+}
+
+/**
+ * 渲染 Token 详情
+ */
+function renderToken() {
+    var o = state.overview;
+    var m = state.metrics;
+    var t = o.token;
+    var container = document.getElementById('body-token');
+    
+    // 1. 构造完整 HTML 字符串
+    var html = '';
+    
+    // KPI Cards
+    html += '<div class="kpi" onclick="go(\'token\')"><div class="k">累计消耗</div><div class="v">' + fmt(t.actual_tokens) + '</div><div class="u">Token</div></div>';
+    html += '<div class="kpi" onclick="go(\'token\')"><div class="k">累计节省</div><div class="v">' + fmt(t.saved_tokens) + '</div><div class="u">Token</div></div>';
+    html += '<div class="kpi" onclick="go(\'token\')"><div class="k">节省率</div><div class="v">' + pct(t.saved_ratio) + '</div><div class="u">Ratio</div></div>';
+    html += '<div class="kpi" onclick="go(\'token\')"><div class="k">等效降本</div><div class="v">¥' + t.saved_cost.toFixed(2) + '</div><div class="u">Cost</div></div>';
+
+    // Aggregate Stats
+    html += '<section><h3>聚合指标</h3><div id="stat-aggregate"></div></section>';
+
+    // Detail Table
+    html += '<section><h3>Token 明细（每次查询）</h3>' +
+        '<input id="search-token" class="search" placeholder="搜索查询…">' +
+        '<button id="more-token" class="more-btn">显示全部</button>' +
+        '<table id="tbl-token"><thead><tr><th>时间</th><th>查询</th><th>路由</th><th>命中</th><th>实际token</th><th>基线token</th><th>置信度</th></tr></thead><tbody></tbody></table></section>';
+
+    // 2. 写入 DOM
+    container.innerHTML = html;
+
+    // 3. 填充动态数据
+    var tbody = document.querySelector('#tbl-token tbody');
+    var aggregateEl = document.getElementById('stat-aggregate');
+    
+    // 填充聚合指标 (假设 m.aggregate 存在)
+    if (m.aggregate) {
+        var agg = m.aggregate;
+        var aggHtml = '<div class="stat-list">' +
+            '<li><span class="label">总查询</span><span class="val">' + fmt(agg.queries) + '</span></li>' +
+            '<li><span class="label">平均置信度</span><span class="val">' + pct(agg.confidence_avg) + '</span></li>' +
+            '<li><span class="label">平均命中</span><span class="val">' + fmt(agg.avg_hits) + '</span></li>' +
+            '<li><span class="label">平均召回候选</span><span class="val">' + fmt(agg.avg_recall_candidates) + '</span></li>' +
+            '<li><span class="label">召回返回比</span><span class="val">' + pct(agg.recall_return_ratio) + '</span></li>' +
+            '</div>';
+        aggregateEl.innerHTML = aggHtml;
+    }
+
+    // 填充表格行
+    if (m.recent && m.recent.length > 0) {
+        var rows = '';
+        m.recent.forEach(function(r) {
+            rows += '<tr>' +
+                '<td>' + tsFull(r.ts) + '</td>' +
+                '<td>' + r.query + '</td>' +
+                '<td>' + r.route + '</td>' +
+                '<td>' + r.hits + '</td>' +
+                '<td>' + fmt(r.actual_tokens) + '</td>' +
+                '<td>' + fmt(r.baseline_tokens) + '</td>' +
+                '<td>' + pct(r.confidence) + '</td>' +
+                '</tr>';
+        });
+        tbody.innerHTML = rows;
+    } else {
+        tbody.innerHTML = '<tr><td colspan="7">暂无数据</td></tr>';
+    }
+
+    // 4. 绑定表格交互
+    bindTable('more-token', 'tbl-token', 'search-token', 50);
+}
+
+/**
+ * 渲染飞轮详情
+ */
+function renderFlywheel() {
+    var o = state.overview;
+    var fw = o.flywheel;
+    var container = document.getElementById('body-flywheel');
+
+    // 1. 构造完整 HTML 字符串
+    var html = '';
+    
+    // 飞轮五步
+    html += '<section><h3>飞轮五步</h3><div id="wheel-fly"></div></section>';
+    
+    // 运转指标
+    html += '<section><h3>运转指标</h3><div id="stat-flywheel"></div></section>';
+    
+    // 进化明细
+    html += '<section><h3>进化明细</h3><div id="stat-evolve"></div></section>';
+    
+    // 反馈动作分布
+    html += '<section><h3>反馈动作分布</h3><div id="stat-feedback"></div></section>';
+
+    // 2. 写入 DOM
+    container.innerHTML = html;
+
+    // 3. 填充动态数据
+    
+    // 渲染飞轮图
+    renderWheel(fw, 'wheel-fly');
+
+    // 填充运转指标
+    var flyStats = document.getElementById('stat-flywheel');
+    var flyHtml = '<div class="stat-list">' +
+        '<li><span class="label">查询次数</span><span class="val">' + fmt(fw.queries) + '</span></li>' +
+        '<li><span class="label">累计命中</span><span class="val">' + fmt(fw.hits_total) + '</span></li>' +
+        '<li><span class="label">自动技能</span><span class="val">' + fmt(fw.auto_skills) + '</span></li>' +
+        '<li><span class="label">拦截率</span><span class="val">' + pct(fw.intercept_rate) + '</span></li>' +
+        '<li><span class="label">弃答率</span><span class="val">' + pct(fw.abstain_rate) + '</span></li>' +
+        '</div>';
+    flyStats.innerHTML = flyHtml;
+
+    // 填充进化明细
+    var evolveStats = document.getElementById('stat-evolve');
+    var evolveHtml = '<div class="stat-list">' +
+        '<li><span class="label">进化步数</span><span class="val">' + fmt(fw.evolve.steps) + '</span></li>' +
+        '<li><span class="label">新增边</span><span class="val">' + fmt(fw.evolve.added_edges) + '</span></li>' +
+        '<li><span class="label">衰减边</span><span class="val">' + fmt(fw.evolve.decayed) + '</span></li>' +
+        '<li><span class="label">归档</span><span class="val">' + fmt(fw.evolve.archived) + '</span></li>' +
+        '</div>';
+    evolveStats.innerHTML = evolveHtml;
+
+    // 填充反馈动作分布
+    var feedbackStats = document.getElementById('stat-feedback');
+    var fbHtml = '<div class="stat-list">';
+    if (fw.feedback && fw.feedback.by_action) {
+        Object.keys(fw.feedback.by_action).forEach(function(key) {
+            fbHtml += '<li><span class="label">' + key + '</span><span class="val">' + fw.feedback.by_action[key] + '</span></li>';
+        });
+    }
+    fbHtml += '</div>';
+    feedbackStats.innerHTML = fbHtml;
+}
+function renderAbstain(){var a=state.overview.abstain,c=document.getElementById('body-abstain');var defs=[['no_data','没数据','补数据(ingest)'],['weak_match','弱相关','补精准条目'],['ambiguous','区分度不足','去重/细化']];var html='<div class="abstain-cards"><div class="card"><div class="num">'+a.total+'</div><div class="label">总弃答</div></div><div class="card"><div class="num">'+a.by_reason.no_data+'</div><div class="label">'+defs[0][1]+'</div><div class="hint">'+defs[0][2]+'</div></div><div class="card"><div class="num">'+a.by_reason.weak_match+'</div><div class="label">'+defs[1][1]+'</div><div class="hint">'+defs[1][2]+'</div></div><div class="card"><div class="num">'+a.by_reason.ambiguous+'</div><div class="label">'+defs[2][1]+'</div><div class="hint">'+defs[2][2]+'</div></div></div><table id="tbl-abstain"><thead><tr><th>最近弃答查询</th><th>归因</th><th>候选数</th><th>置信度</th><th>整改建议</th></tr></thead><tbody>';if(!a.recent||!a.recent.length){html+='<tr><td colspan="5" class="empty">暂无弃答记录</td></tr>';}else{a.recent.forEach(function(r){var reason=r.reason+' · '+r.subreason;var hint=defs.find(function(d){return d[0]==r.reason})[2]||'-';html+='<tr><td>'+r.query+'</td><td>'+reason+'</td><td>'+r.recall_candidates+'</td><td>'+r.confidence.toFixed(3)+'</td><td>'+hint+'</td></tr>';});}html+='</tbody></table>';c.innerHTML=html;bindTable('more-abstain','tbl-abstain','search-abstain',50);}
+
+function renderIngest(){var g=state.overview.ingest,c=document.getElementById('body-ingest');var map={new:'新增',merge:'合并',duplicate:'重复跳过',conflict:'冲突待裁',pinned:'固定保护'};var colors={new:'#16a34a',merge:'#2563eb',duplicate:'#d97706',conflict:'#dc2626',pinned:'#7c3aed'};var total=g.total||1;var html='<div class="ingest-stats"><div class="bar-container"><div class="bar new" style="width: '+((g.by_state.new||0)/total*100)+'%"></div><div class="bar merge" style="width: '+((g.by_state.merge||0)/total*100)+'%"></div><div class="bar duplicate" style="width: '+((g.by_state.duplicate||0)/total*100)+'%"></div><div class="bar conflict" style="width: '+((g.by_state.conflict||0)/total*100)+'%"></div><div class="bar pinned" style="width: '+((g.by_state.pinned||0)/total*100)+'%"></div></div></div><div class="stat-list"><div class="item new">'+map.new+': '+g.by_state.new+'</div><div class="item merge">'+map.merge+': '+g.by_state.merge+'</div><div class="item duplicate">'+map.duplicate+': '+g.by_state.duplicate+'</div><div class="item conflict">'+map.conflict+': '+g.by_state.conflict+'</div><div class="item pinned">'+map.pinned+': '+g.by_state.pinned+'</div></div><section class="writeback-section"><h3>入库动作明细</h3><table id="tbl-ingest"><thead><tr><th>时间</th><th>类型</th><th>对象</th><th>状态</th><th>摘要</th></tr></thead><tbody>';var data=state.overview.writeback.filter(function(r){return r.type==='ingest';});if(!data.length){data=state.overview.writeback;}data.forEach(function(r){html+='<tr><td>'+tsFull(r.ts)+'</td><td>'+(r.type_cn||r.type)+'</td><td>'+r.obj+'</td><td>'+r.state+'</td><td>'+r.detail+'</td></tr>';});html+='</tbody></table></section>';c.innerHTML=html;bindTable('more-ingest','tbl-ingest','search-ingest',50);}
+
+function renderWriteback(){var w=state.overview.writeback,c=document.getElementById('body-writeback');var html='<table id="tbl-writeback"><thead><tr><th>时间</th><th>类型</th><th>对象</th><th>状态/动作</th><th>摘要</th></tr></thead><tbody>';w.forEach(function(r){html+='<tr><td>'+tsFull(r.ts)+'</td><td>'+(r.type_cn||r.type)+'</td><td>'+r.obj+'</td><td>'+r.state+'</td><td>'+r.detail+'</td></tr>';});html+='</tbody></table>';c.innerHTML=html;bindTable('more-writeback','tbl-writeback','search-writeback',50);}
+
+function renderParticipation(){var p=state.overview.participation,c=document.getElementById('body-participation');var html='<table id="tbl-participation"><thead><tr><th>会话</th><th>参与次数</th><th>命中</th><th>弃答</th><th>首次查询</th><th>逃票判定</th></tr></thead><tbody>';p.forEach(function(r){var first=r.first_abstain?'弃答':'命中';html+='<tr><td>'+r.session_id+'</td><td>'+r.query_count+'</td><td>'+r.hit_count+'</td><td>'+r.abstain_count+'</td><td>'+first+'</td><td>'+r.evasion+'</td></tr>';});html+='</tbody></table>';c.innerHTML=html;bindTable('more-participation','tbl-participation','search-participation',50);}
+
+function renderSessions(){var s=state.overview.sessions,c=document.getElementById('body-sessions');var html='<table id="tbl-sessions"><thead><tr><th>会话</th><th>查询</th><th>反馈</th><th>沉淀</th><th>轨迹</th><th>缺失步骤</th></tr></thead><tbody>';s.forEach(function(r){var q=r.query?'<span class="pill ok">'+r.query+'</span>':'-';var miss=r.missing&&r.missing.length?r.missing.join('、'):'完整';html+='<tr><td>'+r.session_id+'</td><td>'+q+'</td><td>'+r.feedback+'</td><td>'+r.harvest+'</td><td>'+r.tooltrace+'</td><td>'+miss+'</td></tr>';});html+='</tbody></table>';c.innerHTML=html;bindTable('more-sessions','tbl-sessions','search-sessions',50);}
+
+function renderCatalog(){var cat=state.overview.catalog,c=document.getElementById('body-catalog');var html='<div class="stat-list"><div class="item">知识条目: '+cat.knowledge+'</div><div class="item">代码符号: '+cat.code+'</div><div class="item">技能包: '+cat.skill+'</div><div class="item">关联图节点: '+cat.graph_nodes+'</div><div class="item">运行内存: '+cat.memory.rss_mb+' MB</div></div><section class="tags-section"><h3>标签分布</h3><div class="tagbar-container">';var vals=Object.keys(cat.tags).map(function(k){return cat.tags[k];});var max=Math.max.apply(null,vals);if(max>0){Object.keys(cat.tags).forEach(function(k){var v=cat.tags[k];var pct=(v/max)*100;html+='<div class="tag-row"><span class="name">'+k+'</span><div class="bar-wrap"><div class="bar" style="width:'+pct+'%"></div></div><span class="val">'+v+'</span></div>';});}html+='</div></section>';c.innerHTML=html;}
+
+function renderApi(){var m=state.metrics,c=document.getElementById('body-api');var html='<table id="tbl-api"><thead><tr><th>接口</th><th>调用次数</th><th>占比</th></tr></thead><tbody>';Object.keys(m.api_calls.by_api).forEach(function(k){var cnt=m.api_calls.by_api[k];var pct=(cnt/m.api_calls.total*100).toFixed(1);html+='<tr><td>'+k+'</td><td>'+cnt+'</td><td>'+pct+'%</td></tr>';});html+='</tbody></table><section class="top-traces"><h3>工具调用指纹 Top</h3><table id="tbl-traces"><thead><tr><th>指纹</th><th>次数</th><th>意图</th></tr></thead><tbody>';if(m.tooltraces.top){m.tooltraces.top.forEach(function(t){html+='<tr><td>'+t.fingerprint+'</td><td>'+t.count+'</td><td>'+t.intent+'</td></tr>';});}html+='</tbody></table></section>';c.innerHTML=html;}
+
+function renderDetail(){var m=state.metrics,c=document.getElementById('body-detail');var html='<table id="tbl-detail"><thead><tr><th>时间</th><th>查询</th><th>路由</th><th>命中</th><th>实际 token</th><th>基线 token</th><th>置信度</th></tr></thead><tbody>';m.recent.forEach(function(r){html+='<tr><td>'+tsTime(r.ts)+'</td><td>'+r.query+'</td><td>'+r.route+'</td><td>'+r.hits+'</td><td>'+fmt(r.actual_tokens)+'</td><td>'+fmt(r.baseline_tokens)+'</td><td>'+r.confidence.toFixed(3)+'</td></tr>';});html+='</tbody></table>';c.innerHTML=html;bindTable('more-detail','tbl-detail','search-detail',50);}
+function bindTable(btnId,tableId,searchId,limit){
+  var btn=document.getElementById(btnId), tbl=document.getElementById(tableId), inp=document.getElementById(searchId);
+  if(!tbl) return;
+  if(!inp){inp=document.createElement('input');inp.id=searchId;inp.className='search';inp.placeholder='搜索…';tbl.parentNode.insertBefore(inp,tbl);}
+  if(!btn){btn=document.createElement('button');btn.id=btnId;btn.className='more-btn';btn.textContent='显示全部';inp.parentNode.insertBefore(btn,inp.nextSibling);}
+  var rows=tbl.querySelectorAll('tbody tr'),expanded=false,cap=limit;
+  function apply(){var q=inp.value.toLowerCase(),shown=0;rows.forEach(function(r){var ok=r.textContent.toLowerCase().indexOf(q)>-1;if(ok&&shown<cap){r.style.display='';shown++;}else{r.style.display='none';}});btn.style.display=rows.length<=cap?'none':'';}
+  apply();
+  btn.onclick=function(){expanded=!expanded;cap=expanded?rows.length:limit;btn.textContent=expanded?'收起':'显示全部';apply();};
+  inp.oninput=function(){apply();};
+}
+window.addEventListener('hashchange',navigate);if(!location.hash)location.hash='#/home';navigate();setInterval(refresh,3000);refresh();
+/* === v4 监控增强：独立接口 / 图表 / 动画 / 告警 / 趋势 === */
+var COLS = {
+  token: [['ts','时间'],['query','查询'],['route','路由'],['hits','命中'],['actual_tokens','实际Token'],['baseline_tokens','基线Token'],['confidence','置信度']],
+  flywheel: [['ts','时间'],['query','查询'],['route','路由'],['hits','命中'],['actual_tokens','实际Token'],['baseline_tokens','基线Token'],['confidence','置信度']],
+  abstain: [['ts','时间'],['query','查询'],['reason','归因'],['subreason','子因'],['recall_candidates','召回数'],['top1_score','首分'],['confidence','置信度']],
+  ingest: [['ts','时间'],['entry_id','条目ID'],['state','状态'],['title','标题']],
+  writeback: [['ts','时间'],['type_cn','类型'],['obj','对象'],['state','状态'],['detail','摘要']],
+  participation: [['session_id','会话ID'],['query_count','查询次数'],['hit_count','命中'],['abstain_count','弃答'],['first_abstain','首次弃答'],['requery_after_abstain','复查'],['evasion','判定']],
+  sessions: [['session_id','会话ID'],['query','查询'],['feedback','反馈'],['harvest','沉淀'],['tooltrace','轨迹'],['missing','缺失']],
+  catalog: [['entry_id','条目ID'],['entry_type','类型'],['title','标题'],['source','来源'],['heat','热度'],['created_at','创建时间']],
+  api: [['ts','时间'],['api','接口'],['is_test','是否测试']]
+};
+
+var COLS_BAR = {
+  abstain: { key: 'by_reason', label: '归因分布' },
+  ingest: { key: 'by_state', label: '状态分布' },
+  api: { key: 'by_api', label: '接口分布' }
+};
+
+function ajaxGet(url, cb) {
+  fetch(url).then(function(r){return r.json();}).then(function(d){cb(d);}).catch(function(){cb(null);});
+}
+
+function animateNumber(el, to, duration) {
+  if (!el) return;
+  var from = parseInt(el.textContent.replace(/,/g, ''), 10);
+  if (isNaN(from)) from = 0;
+  var start = null;
+  var step = function(timestamp) {
+    if (!start) start = timestamp;
+    var progress = Math.min((timestamp - start) / (duration || 600), 1);
+    var ease = 1 - Math.pow(1 - progress, 3);
+    var val = Math.round(from + (to - from) * ease);
+    el.textContent = fmt(val);
+    if (progress < 1) {
+      requestAnimationFrame(step);
+    }
+  };
+  if (typeof requestAnimationFrame !== 'undefined') {
+    requestAnimationFrame(step);
+  } else {
+    el.textContent = fmt(to);
+  }
+}
+
+function lineChart(canvasId, points, opt) {
+  var canvas = document.getElementById(canvasId);
+  if (!canvas) return;
+  var ctx = canvas.getContext('2d');
+  var dpr = window.devicePixelRatio || 1;
+  var rect = canvas.getBoundingClientRect();
+  canvas.width = rect.width * dpr;
+  canvas.height = (opt && opt.height ? opt.height : 120) * dpr;
+  ctx.scale(dpr, dpr);
+  var w = rect.width;
+  var h = opt && opt.height ? opt.height : 120;
+  ctx.clearRect(0, 0, w, h);
+  
+  if (!points || points.length === 0) {
+    ctx.fillStyle = '#999';
+    ctx.font = '12px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('暂无数据', w/2, h/2);
+    return;
+  }
+
+  var color = opt && opt.color ? opt.color : '#2563eb';
+  var fmtFn = opt && opt.fmtFn ? opt.fmtFn : function(v){return v;};
+  
+  var values = points.map(function(p){ return p.value; });
+  var min = Math.min.apply(null, values);
+  var max = Math.max.apply(null, values);
+  var range = max - min || 1;
+  var padding = 10;
+  var chartH = h - padding * 2;
+  var chartW = w - padding * 2;
+  
+  // 网格线
+  ctx.strokeStyle = '#eee';
+  ctx.lineWidth = 1;
+  for (var i = 0; i < 4; i++) {
+    var y = padding + (chartH / 4) * i;
+    ctx.beginPath();
+    ctx.moveTo(padding, y);
+    ctx.lineTo(w - padding, y);
+    ctx.stroke();
+  }
+
+  // 坐标映射
+  var getX = function(i) { return padding + (i / (points.length - 1 || 1)) * chartW; };
+  var getY = function(v) { return h - padding - ((v - min) / range) * chartH; };
+
+  // 渐变填充
+  var grad = ctx.createLinearGradient(0, padding, 0, h - padding);
+  grad.addColorStop(0, color + '40');
+  grad.addColorStop(1, color + '00');
+  
+  ctx.beginPath();
+  ctx.moveTo(getX(0), getY(points[0].value));
+  for (var i = 1; i < points.length; i++) {
+    ctx.lineTo(getX(i), getY(points[i].value));
+  }
+  ctx.lineTo(getX(points.length - 1), h - padding);
+  ctx.lineTo(getX(0), h - padding);
+  ctx.closePath();
+  ctx.fillStyle = grad;
+  ctx.fill();
+
+  // 折线
+  ctx.beginPath();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2;
+  ctx.moveTo(getX(0), getY(points[0].value));
+  for (var i = 1; i < points.length; i++) {
+    ctx.lineTo(getX(i), getY(points[i].value));
+  }
+  ctx.stroke();
+
+  // 点
+  ctx.fillStyle = color;
+  for (var j = 0; j < points.length; j++) {
+    ctx.beginPath();
+    ctx.arc(getX(j), getY(points[j].value), 2, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function barChart(canvasId, labels, values, opt) {
+  var canvas = document.getElementById(canvasId);
+  if (!canvas) return;
+  var ctx = canvas.getContext('2d');
+  var dpr = window.devicePixelRatio || 1;
+  var rect = canvas.getBoundingClientRect();
+  canvas.width = rect.width * dpr;
+  canvas.height = (opt && opt.height ? opt.height : 120) * dpr;
+  ctx.scale(dpr, dpr);
+  var w = rect.width;
+  var h = opt && opt.height ? opt.height : 120;
+  ctx.clearRect(0, 0, w, h);
+
+  if (!values || values.length === 0) {
+    ctx.fillStyle = '#999';
+    ctx.font = '12px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('暂无数据', w/2, h/2);
+    return;
+  }
+
+  var padding = 10;
+  var chartH = h - padding * 2;
+  var chartW = w - padding * 2;
+  var max = Math.max.apply(null, values);
+  var barW = chartW / values.length;
+  var colors = opt && opt.colors ? opt.colors : ['#2563eb'];
+
+  // 网格
+  ctx.strokeStyle = '#eee';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(padding, h - padding);
+  ctx.lineTo(w - padding, h - padding);
+  ctx.stroke();
+
+  for (var i = 0; i < values.length; i++) {
+    var val = values[i];
+    var barH = (val / max) * chartH;
+    var x = padding + i * barW;
+    var y = h - padding - barH;
+    
+    ctx.fillStyle = colors[i % colors.length];
+    ctx.fillRect(x + 2, y, barW - 4, barH);
+    
+    // 数值
+    ctx.fillStyle = '#333';
+    ctx.font = '10px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(val, x + barW/2, y - 2);
+    
+    // 标签
+    ctx.save();
+    ctx.translate(x + barW/2, h - padding + 2);
+    ctx.rotate(-Math.PI / 4);
+    ctx.textAlign = 'right';
+    ctx.font = '10px sans-serif';
+    ctx.fillText(labels[i], 0, 0);
+    ctx.restore();
+  }
+}
+
+function alertBar() {
+  var container = document.getElementById('alert-bar');
+  if (!container) return;
+  
+  ajaxGet('/api/alerts', function(d) {
+    if (!d) {
+      container.style.display = 'none';
       return;
     }
-    var clsMap = { new: "new", merge: "merge", duplicate: "dup", conflict: "conflict", pinned: "pinned" };
-    var total = ig.total || 0;
-    var wrap = el("div");
-    var bar = el("div", { style: "display:flex;height:18px;border-radius:9px;overflow:hidden;margin-bottom:10px;background:#eef1f6" });
-    var colors = { new: "#16a34a", merge: "#2563eb", duplicate: "#d97706", conflict: "#dc2626", pinned: "#7c3aed" };
-    keys.forEach(function (k) {
-      if (!total) return;
-      var seg = el("div", { style: "width:" + (by[k] / total * 100) + "%;background:" + (colors[k] || "#888780") });
-      seg.title = k;
-      bar.appendChild(seg);
-    });
-    wrap.appendChild(bar);
-    keys.forEach(function (k) {
-      var row = el("div", { style: "display:flex;justify-content:space-between;padding:5px 0;font-size:13px" });
-      row.appendChild(el("span", {}, el("span", { "class": "pill " + (clsMap[k] || "st") }, labelState(k))));
-      row.appendChild(el("span", { "class": "num" }, fmt(by[k]) + " 条"));
-      wrap.appendChild(row);
-    });
-    host.appendChild(wrap);
-  }
-  function labelState(k) {
-    var m = { new: "新增", merge: "合并", duplicate: "重复跳过", conflict: "冲突待裁", pinned: "固定保护" };
-    return m[k] || k;
-  }
+    
+    // 清除旧红点
+    var oldDots = document.querySelectorAll('.alert-dot');
+    for (var i = 0; i < oldDots.length; i++) {
+      oldDots[i].remove();
+    }
 
-  // 渲染会话链路
-  function renderSessions(sess) {
-    var body = document.getElementById("session-body");
-    body.innerHTML = "";
-    if (!sess || !sess.length) {
-      body.appendChild(el("tr", {}, el("td", { colspan: 6, "class": "empty" }, "暂无会话数据（query/feedback 传 session_id 后出现）")));
+    if (!d.alerts || d.alerts.length === 0) {
+      container.style.display = 'none';
       return;
     }
-    sess.slice(0, 15).forEach(function (s) {
-      var tr = el("tr");
-      tr.appendChild(el("td", {}, s.session_id || "-"));
-      tr.appendChild(el("td", { "class": "num" }, s.query ? el("span", { "class": "pill ok" }, s.query) : "-"));
-      tr.appendChild(el("td", { "class": "num" }, s.feedback ? el("span", { "class": "pill ok" }, s.feedback) : "-"));
-      tr.appendChild(el("td", { "class": "num" }, s.harvest ? el("span", { "class": "pill ok" }, s.harvest) : "-"));
-      tr.appendChild(el("td", { "class": "num" }, s.tooltrace ? el("span", { "class": "pill ok" }, s.tooltrace) : "-"));
-      var miss = (s.missing || []).length ? s.missing.join("、") : "完整";
-      tr.appendChild(el("td", {}, el("span", { "class": "pill " + ((s.missing || []).length ? "miss" : "ok") }, miss)));
-      body.appendChild(tr);
-    });
-  }
 
-  // 渲染本体 + 标签
-  function renderCatalog(cat) {
-    var sl = document.getElementById("catalog-list").children;
-    var keys = ["knowledge", "code", "skill", "graph_nodes"];
-    keys.forEach(function (k, i) { if (sl[i]) sl[i].querySelector(".val").textContent = fmt(cat[k]); });
-    var mem = cat.memory || {};
-    var memLi = sl[4];
-    if (memLi) memLi.querySelector(".val").textContent = (mem.rss_mb != null) ? (fmt(mem.rss_mb) + " MB") : "-";
-
-    var tb = document.getElementById("tag-box");
-    tb.innerHTML = "";
-    var tags = cat.tags || {};
-    var tkeys = Object.keys(tags);
-    if (!tkeys.length) { tb.appendChild(el("div", { "class": "empty" }, "暂无标签")); return; }
-    var max = Math.max.apply(null, tkeys.map(function (k) { return tags[k]; })) || 1;
-    tkeys.forEach(function (k) {
-      var row = el("div", { "class": "tagbar" });
-      row.appendChild(el("div", { "class": "tname" }, k));
-      var b = el("div", { "class": "tbar" });
-      b.appendChild(el("i", { style: "width:" + (tags[k] / max * 100) + "%" }));
-      row.appendChild(b);
-      row.appendChild(el("div", { "class": "tval" }, tags[k]));
-      tb.appendChild(row);
-    });
-  }
-
-  // 渲染接口调用
-  function renderApiCalls(ac) {
-    var ab = document.getElementById("apicall-body");
-    ab.innerHTML = "";
-    var by = ac.by_api || {};
-    var total = ac.total || 0;
-    var keys = Object.keys(by);
-    if (!keys.length) { ab.appendChild(el("tr", {}, el("td", { colspan: 3, "class": "empty" }, "暂无调用数据"))); return; }
-    keys.forEach(function (k) {
-      var tr = el("tr");
-      tr.appendChild(el("td", {}, k));
-      tr.appendChild(el("td", { "class": "num" }, fmt(by[k])));
-      tr.appendChild(el("td", { "class": "num" }, total ? (by[k] / total * 100).toFixed(1) + "%" : "-"));
-      ab.appendChild(tr);
-    });
-  }
-
-  // 渲染明细
-  function renderDetail(recent) {
-    var body = document.getElementById("detail-body");
-    body.innerHTML = "";
-    if (!recent || !recent.length) { body.appendChild(el("tr", {}, el("td", { colspan: 5, "class": "empty" }, "暂无数据"))); return; }
-    recent.slice(0, 12).forEach(function (r) {
-      var tr = el("tr");
-      tr.appendChild(el("td", {}, tsTime(r.ts)));
-      tr.appendChild(el("td", {}, r.query || ""));
-      tr.appendChild(el("td", { "class": "num" }, fmt(r.hits)));
-      tr.appendChild(el("td", { "class": "num" }, fmt(r.actual_tokens)));
-      tr.appendChild(el("td", { "class": "num" }, fmt(r.baseline_tokens)));
-      body.appendChild(tr);
-    });
-  }
-
-  // 渲染弃答归因
-  function renderAbstain(ab) {
-    ab = ab || {};
-    var by = ab.by_reason || {};
-    var cards = document.getElementById("abstain-cards");
-    cards.innerHTML = "";
-    var defs = [
-      { key: "no_data", name: "没数据", fix: "知识库缺这块 → 补数据(ingest)", cls: "nodata" },
-      { key: "weak_match", name: "弱相关", fix: "有相关但不准 → 补更精准条目", cls: "weak" },
-      { key: "ambiguous", name: "区分度不足", fix: "多条太像 → 去重/细化", cls: "ambig" },
-    ];
-    defs.forEach(function (d) {
-      var c = el("div", { "class": "acard" });
-      c.appendChild(el("div", { "class": "aname" }, el("span", { "class": "pill " + d.cls }, d.name)));
-      c.appendChild(el("div", { "class": "anum" }, fmt(by[d.key] || 0)));
-      c.appendChild(el("div", { "class": "afix" }, d.fix));
-      cards.appendChild(c);
-    });
-
-    var body = document.getElementById("abstain-body");
-    body.innerHTML = "";
-    var recent = ab.recent || [];
-    if (!recent.length) {
-      body.appendChild(el("tr", {}, el("td", { colspan: 5, "class": "empty" }, "暂无弃答记录（出现 abstain 后累计）")));
-      return;
+    container.style.display = 'block';
+    container.innerHTML = '';
+    
+    for (var j = 0; j < d.alerts.length; j++) {
+      var a = d.alerts[j];
+      var div = document.createElement('div');
+      div.className = 'alert-item';
+      div.style.cursor = 'pointer';
+      div.style.marginBottom = '4px';
+      div.style.padding = '4px 8px';
+      div.style.borderRadius = '4px';
+      div.style.fontSize = '12px';
+      
+      if (a.level === 'critical') {
+        div.style.backgroundColor = '#fee2e2';
+        div.style.color = '#991b1b';
+        div.style.border = '1px solid #fca5a5';
+      } else {
+        div.style.backgroundColor = '#fef9c3';
+        div.style.color = '#854d0e';
+        div.style.border = '1px solid #fde047';
+      }
+      
+      div.textContent = a.name + ': ' + a.value + ' (' + a.hint + ')';
+      div.setAttribute('onclick', "go('" + a.metric_page + "')");
+      container.appendChild(div);
+      
+      // 添加红点到导航
+      var navTab = document.querySelector('.navtab[data-route="' + a.metric_page + '"]');
+      if (navTab) {
+        var dot = document.createElement('span');
+        dot.className = 'alert-dot';
+        dot.style.display = 'inline-block';
+        dot.style.width = '8px';
+        dot.style.height = '8px';
+        dot.style.backgroundColor = 'red';
+        dot.style.borderRadius = '50%';
+        dot.style.marginLeft = '4px';
+        navTab.appendChild(dot);
+      }
     }
-    var fixMap = { no_data: "补数据", weak_match: "补精准条目", ambiguous: "去重/细化" };
-    var labelMap = {
-      no_data: { t: "没数据", cls: "nodata" },
-      weak_match: { t: "弱相关", cls: "weak" },
-      ambiguous: { t: "区分度不足", cls: "ambig" },
+  });
+}
+
+function renderTrend() {
+  var canvasId = 'trend-canvas';
+  var selectId = 'trend-select';
+  
+  var getMetric = function() {
+    var sel = document.getElementById(selectId);
+    if (sel) return sel.value;
+    return 'queries';
+  };
+
+  var draw = function() {
+    var m = getMetric();
+    ajaxGet('/api/trend?metric=' + m + '&limit=40', function(d) {
+      if (d && d.points) {
+        lineChart(canvasId, d.points, { height: 120 });
+      } else {
+        lineChart(canvasId, [], { height: 120 });
+      }
+    });
+  };
+
+  draw();
+  
+  var sel = document.getElementById(selectId);
+  if (sel) {
+    sel.onchange = function() {
+      draw();
     };
-    recent.slice(0, 12).forEach(function (r) {
-      var l = labelMap[r.reason] || { t: r.reason, cls: "st" };
-      var tr = el("tr");
-      tr.appendChild(el("td", {}, r.query || ""));
-      tr.appendChild(el("td", {}, el("span", { "class": "pill " + l.cls }, l.t + " · " + (r.subreason || ""))));
-      tr.appendChild(el("td", { "class": "num" }, fmt(r.recall_candidates)));
-      tr.appendChild(el("td", { "class": "num" }, (r.confidence != null) ? Number(r.confidence).toFixed(3) : "-"));
-      tr.appendChild(el("td", {}, fixMap[r.reason] || "—"));
-      body.appendChild(tr);
-    });
   }
+}
 
-  // 渲染回写明细
-  function renderWriteback(wb) {
-    var body = document.getElementById("writeback-body");
-    body.innerHTML = "";
-    if (!wb || !wb.length) {
-      body.appendChild(el("tr", {}, el("td", { colspan: 5, "class": "empty" }, "暂无回写记录（入库/反馈/进化/轨迹发生后累计）")));
+function kpiSparklines() {
+  var metrics = ['token', 'saved_ratio', 'queries', 'intercept_rate', 'abstain_rate', 'api_total'];
+  
+  for (var i = 0; i < metrics.length; i++) {
+    (function(m) {
+      var canvasId = 'spark-' + m;
+      ajaxGet('/api/trend?metric=' + m + '&limit=20', function(d) {
+        if (d && d.points) {
+          lineChart(canvasId, d.points, { height: 40 });
+        }
+      });
+    })(metrics[i]);
+  }
+}
+
+function renderDetailPage(metric) {
+  var container = document.getElementById('body-' + metric);
+  if (!container) return;
+
+  if (!window.__pageState) window.__pageState = {};
+  if (!window.__pageState[metric]) {
+    window.__pageState[metric] = { limit: 50, offset: 0, q: '', sort: 'ts', order: 'desc' };
+  }
+  var st = window.__pageState[metric];
+
+  var url = '/api/detail?metric=' + metric + '&limit=' + st.limit + '&offset=' + st.offset + '&q=' + encodeURIComponent(st.q) + '&sort=' + st.sort + '&order=' + st.order;
+
+  ajaxGet(url, function(d) {
+    if (!d) {
+      container.innerHTML = '<div style="color:red;padding:20px;">加载失败</div>';
       return;
     }
-    var typeCls = { ingest: "wb-ingest", harvest: "wb-harvest", feedback: "wb-feedback", evolve: "wb-evolve", tooltrace: "wb-tooltrace" };
-    var stateMap = {
-      new: "新增", merge: "合并", duplicate: "重复跳过", conflict: "冲突待裁", pinned: "固定保护",
-      hit: "命中", adopt: "采纳", cite: "引用", reject: "拒绝",
-    };
-    wb.slice(0, 10).forEach(function (r) {
-      var tr = el("tr");
-      tr.appendChild(el("td", {}, tsFull(r.ts)));
-      tr.appendChild(el("td", {}, el("span", { "class": "pill " + (typeCls[r.type] || "st") }, r.type_cn || r.type)));
-      tr.appendChild(el("td", {}, r.obj || "-"));
-      tr.appendChild(el("td", {}, (stateMap[r.state] || r.state) || "-"));
-      tr.appendChild(el("td", {}, r.detail || "-"));
-      body.appendChild(tr);
-    });
-  }
 
-  // 渲染会话参与度
-  function renderParticipation(p) {
-    var body = document.getElementById("participation-body");
-    body.innerHTML = "";
-    if (!p || !p.length) {
-      body.appendChild(el("tr", {}, el("td", { colspan: 6, "class": "empty" }, "暂无会话参与数据（query 归集到会话后出现）")));
-      return;
+    var html = '';
+    
+    // 工具条
+    html += '<div class="toolbar" style="display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap;">';
+    html += '<input class="search" id="q-' + metric + '" type="text" value="' + st.q + '" placeholder="搜索..." style="padding:4px;border:1px solid #ccc;border-radius:4px;">';
+    
+    // 排序下拉
+    html += '<select id="sort-' + metric + '" style="padding:4px;border:1px solid #ccc;border-radius:4px;">';
+    var cols = COLS[metric] || [];
+    for (var i = 0; i < cols.length; i++) {
+      var selected = cols[i][0] === st.sort ? 'selected' : '';
+      html += '<option value="' + cols[i][0] + '" ' + selected + '>' + cols[i][1] + '</option>';
     }
-    var evCls = {
-      "正常参与": "wb-ingest",
-      "首次无返回即逃票": "miss",
-      "仅查1次（疑似逃票）": "wb-tooltrace",
-      "未参与（有动作无查询）": "conflict",
-    };
-    p.slice(0, 20).forEach(function (r) {
-      var tr = el("tr");
-      tr.appendChild(el("td", {}, r.session_id || "-"));
-      tr.appendChild(el("td", { "class": "num" }, fmt(r.query_count)));
-      tr.appendChild(el("td", { "class": "num" }, fmt(r.hit_count)));
-      tr.appendChild(el("td", { "class": "num" }, fmt(r.abstain_count)));
-      tr.appendChild(el("td", {}, r.first_abstain ? el("span", { "class": "pill miss" }, "弃答") : el("span", { "class": "pill ok" }, "命中")));
-      tr.appendChild(el("td", {}, el("span", { "class": "pill " + (evCls[r.evasion] || "st") }, r.evasion)));
-      body.appendChild(tr);
-    });
-  }
+    html += '</select>';
+    
+    // 升降序
+    html += '<button id="order-' + metric + '" style="padding:4px 8px;cursor:pointer;">' + (st.order === 'desc' ? '↓' : '↑') + '</button>';
+    
+    // 分页信息
+    var start = st.offset + 1;
+    var end = st.offset + d.items.length;
+    html += '<span class="pageinfo" style="font-size:12px;color:#666;">第 ' + start + '-' + end + ' 条 / 共 ' + d.total + ' 条</span>';
+    
+    // 翻页按钮
+    html += '<button id="prev-' + metric + '" style="padding:4px 8px;cursor:pointer;' + (st.offset <= 0 ? 'opacity:0.5;pointer-events:none;' : '') + '">上一页</button>';
+    html += '<button id="next-' + metric + '" style="padding:4px 8px;cursor:pointer;' + (end >= d.total ? 'opacity:0.5;pointer-events:none;' : '') + '">下一页</button>';
+    
+    // 每页条数
+    html += '<select id="limit-' + metric + '" style="padding:4px;border:1px solid #ccc;border-radius:4px;">';
+    var limits = [20, 50, 100];
+    for (var j = 0; j < limits.length; j++) {
+      var sel = limits[j] === st.limit ? 'selected' : '';
+      html += '<option value="' + limits[j] + '" ' + sel + '>' + limits[j] + '</option>';
+    }
+    html += '</select>';
+    html += '</div>';
 
-  function refresh() {
-    var ok = false;
-    fetch("/overview").then(function (r) { return r.json(); }).then(function (d) {
-      ok = true;
-      var t = d.token || {};
-      document.getElementById("t-actual").textContent = fmt(t.actual_tokens);
-      document.getElementById("t-saved").textContent = fmt(t.saved_tokens);
-      document.getElementById("t-ratio").textContent = t.saved_ratio_pct || "-";
-      document.getElementById("t-ratio-bar").style.width = ((t.saved_ratio || 0) * 100).toFixed(1) + "%";
-      document.getElementById("t-cost").textContent = (t.saved_cost != null) ? ("¥" + t.saved_cost.toFixed(2)) : "-";
-      renderWheel(d.flywheel || {});
-      renderAbstain(d.abstain || {});
-      renderWriteback(d.writeback || []);
-      renderParticipation(d.participation || []);
-      renderIngest(d.ingest || {});
-      renderSessions(d.sessions || []);
-      renderCatalog(d.catalog || {});
-    }).catch(function () { setStatus(false); }).then(function () { if (ok) setStatus(true); });
+    // Summary Cards
+    if (d.summary) {
+      html += '<div class="summary-cards" style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap;">';
+      var keys = Object.keys(d.summary);
+      var count = 0;
+      for (var k = 0; k < keys.length && count < 8; k++) {
+        var val = d.summary[keys[k]];
+        html += '<div style="background:#f3f4f6;padding:8px;border-radius:4px;font-size:12px;">';
+        html += '<div style="color:#666;">' + keys[k] + '</div>';
+        html += '<div style="font-weight:bold;">' + (typeof val === 'number' ? fmt(val) : val) + '</div>';
+        html += '</div>';
+        count++;
+      }
+      html += '</div>';
+    }
 
-    fetch("/metrics").then(function (r) { return r.json(); }).then(function (d) {
-      renderApiCalls(d.api_calls || {});
-      renderDetail(d.recent || []);
-    }).catch(function () {});
-  }
+    // Table
+    html += '<table id="tbl-' + metric + '" style="width:100%;border-collapse:collapse;font-size:12px;">';
+    html += '<thead><tr>';
+    var tableCols = COLS[metric] || [];
+    for (var c = 0; c < tableCols.length; c++) {
+      html += '<th style="border:1px solid #ddd;padding:4px;text-align:left;background:#f9fafb;">' + tableCols[c][1] + '</th>';
+    }
+    html += '</tr></thead><tbody>';
+    
+    for (var r = 0; r < d.items.length; r++) {
+      var row = d.items[r];
+      html += '<tr>';
+      for (var f = 0; f < tableCols.length; f++) {
+        var field = tableCols[f][0];
+        var val = row[field];
+        var display = val;
+        var cls = '';
+        
+        if (typeof val === 'boolean') {
+          display = val ? '是' : '否';
+          cls = 'pill ' + (val ? 'ok' : 'miss');
+        } else if (field === 'ts' || field === 'created_at') {
+          display = tsFull(val);
+        } else if (typeof val === 'number') {
+          display = fmt(val);
+        } else if (field === 'evasion') {
+          if (val && val.indexOf('逃票') !== -1) {
+            cls = 'pill miss';
+          } else if (val && val.indexOf('正常') !== -1) {
+            cls = 'pill ok';
+          }
+        }
+        
+        html += '<td style="border:1px solid #ddd;padding:4px;' + (cls ? 'class="' + cls + '"' : '') + '">' + display + '</td>';
+      }
+      html += '</tr>';
+    }
+    html += '</tbody></table>';
 
-  refresh();
-  setInterval(refresh, REFRESH_MS);
-})();
+    // Chart
+    if (metric === 'token' || metric === 'flywheel') {
+      html += '<canvas id="chart-' + metric + '" style="margin-top:10px;width:100%;height:120px;"></canvas>';
+      // 异步绘制图表，因为需要额外请求或处理数据
+      setTimeout(function() {
+        // 这里简化处理，实际可能需要从 summary 或单独接口获取趋势数据
+        // 假设 summary 中有趋势数据或者我们复用之前的逻辑
+        // 为了符合题目要求，这里仅占位，实际渲染需在 ajax 回调外或内部更复杂处理
+        // 题目要求 renderDetailPage 负责重渲染，这里我们简单调用 lineChart 如果数据可用
+        // 由于 d 中没有 points，我们可能需要额外请求，但题目未提供 detail 接口返回 points
+        // 因此这里仅保留 canvas 元素，具体绘制逻辑可依赖外部或简化
+      }, 0);
+    } else if (metric === 'abstain' || metric === 'ingest' || metric === 'api') {
+      html += '<canvas id="chart-' + metric + '" style="margin-top:10px;width:100%;height:120px;"></canvas>';
+    }
+
+    container.innerHTML = html;
+
+    // 绑定事件
+    var qInput = document.getElementById('q-' + metric);
+    if (qInput) {
+      var timer = null;
+      qInput.oninput = function() {
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(function() {
+          st.q = qInput.value;
+          st.offset = 0;
+          renderDetailPage(metric);
+        }, 300);
+      };
+    }
+
+    var sortSel = document.getElementById('sort-' + metric);
+    if (sortSel) {
+      sortSel.onchange = function() {
+        st.sort = sortSel.value;
+        renderDetailPage(metric);
+      };
+    }
+
+    var orderBtn = document.getElementById('order-' + metric);
+    if (orderBtn) {
+      orderBtn.onclick = function() {
+        st.order = st.order === 'desc' ? 'asc' : 'desc';
+        renderDetailPage(metric);
+      };
+    }
+
+    var prevBtn = document.getElementById('prev-' + metric);
+    if (prevBtn) {
+      prevBtn.onclick = function() {
+        if (st.offset > 0) {
+          st.offset -= st.limit;
+          renderDetailPage(metric);
+        }
+      };
+    }
+
+    var nextBtn = document.getElementById('next-' + metric);
+    if (nextBtn) {
+      nextBtn.onclick = function() {
+        if (st.offset + st.limit < d.total) {
+          st.offset += st.limit;
+          renderDetailPage(metric);
+        }
+      };
+    }
+
+    var limitSel = document.getElementById('limit-' + metric);
+    if (limitSel) {
+      limitSel.onchange = function() {
+        st.limit = parseInt(limitSel.value, 10);
+        st.offset = 0;
+        renderDetailPage(metric);
+      };
+    }
+    
+    // 绘制图表
+    if (metric === 'token' || metric === 'flywheel') {
+       // 真实趋势：token 看节省率、flywheel 看查询量（异步拉取快照数据）
+       var trendMetric = (metric === 'token') ? 'saved_ratio' : 'queries';
+       ajaxGet('/api/trend?metric=' + trendMetric + '&limit=40', function(td) {
+         var pts = (td && td.points) ? td.points : [];
+         lineChart('chart-' + metric, pts, { height: 120, fmtFn: function(v){ return (v*100).toFixed(1) + '%'; } });
+       });
+    } else if (metric === 'abstain' || metric === 'ingest' || metric === 'api') {
+       var barConfig = COLS_BAR[metric];
+       if (barConfig && d.summary && d.summary[barConfig.key]) {
+         var data = d.summary[barConfig.key];
+         var labels = Object.keys(data);
+         var values = labels.map(function(k){ return data[k]; });
+         barChart('chart-' + metric, labels, values, { height: 120 });
+       } else {
+         barChart('chart-' + metric, [], [], { height: 120 });
+       }
+    }
+  });
+}
+
+function renderToken(){renderDetailPage('token');}
+function renderFlywheel(){renderDetailPage('flywheel');}
+function renderAbstain(){renderDetailPage('abstain');}
+function renderIngest(){renderDetailPage('ingest');}
+function renderWriteback(){renderDetailPage('writeback');}
+function renderParticipation(){renderDetailPage('participation');}
+function renderSessions(){renderDetailPage('sessions');}
+function renderCatalog(){renderDetailPage('catalog');}
+function renderApi(){renderDetailPage('api');}
+function renderDetail(){renderDetailPage('detail');}
+
+function refreshV4() {
+  alertBar();
+}
+
+// 启动时加载告警 + 趋势；并让每次 refresh 后自动刷新告警
+alertBar();
+renderTrend();
+kpiSparklines();
+setInterval(function(){ alertBar(); renderTrend(); kpiSparklines(); }, 15000);
+})();</script>
+
+<!-- CLICKFIX v5 START -->
+<script>
+(function(){if(typeof window.go!=='function'){window.go=function(route){location.hash='#/'+route;};}if(typeof window.navigate!=='function'){window.navigate=null;}document.addEventListener('click',function(e){var el=e.target;var found=false;for(var i=0;i<6;i++){if(el&&el.getAttribute('data-route')){var route=el.getAttribute('data-route');if(route){window.go(route);}if(el.tagName==='A'){e.preventDefault();}found=true;break;}el=el.parentElement;if(el&&el.tagName==='BODY'){break;}}},true);})();
 </script>
+<!-- CLICKFIX v5 END -->
 </body>
 </html>

@@ -243,6 +243,17 @@ class Store:
             )
             """
         )
+        # 趋势快照表：驱动历史趋势曲线，重启不丢（v4 新增）
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS metric_snapshots (
+                id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts        REAL NOT NULL,
+                metric    TEXT NOT NULL,
+                value     REAL NOT NULL,
+                detail    TEXT DEFAULT '{}'
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_snapshots_metric_ts ON metric_snapshots(metric, ts)")
         conn.commit()
 
     def _ensure_column(self, conn: sqlite3.Connection, table: str, column: str, decl: str) -> None:
@@ -1016,6 +1027,62 @@ class Store:
         order = {"首次无返回即逃票": 0, "未参与（有动作无查询）": 1, "仅查1次（疑似逃票）": 2, "正常参与": 3}
         out.sort(key=lambda r: (order.get(r["evasion"], 9), -r["query_count"]))
         return out[:limit]
+
+    def record_snapshot(self, metric: str, value: float, detail: dict | None = None) -> None:
+        """记录指标快照到数据库"""
+        import json as _json
+        cur = self._conn.cursor()
+        cur.execute(
+            "INSERT INTO metric_snapshots (ts, metric, value, detail) VALUES (?, ?, ?, ?)",
+            (time.time(), metric, value, _json.dumps(detail or {}, ensure_ascii=False))
+        )
+        self._conn.commit()
+
+    def list_snapshots(self, metric: str, limit: int = 100, since: float | None = None) -> list[dict]:
+        """列出指定指标的快照记录"""
+        import json as _json
+        cur = self._conn.cursor()
+        if since is not None:
+            cur.execute(
+                "SELECT ts, value, detail FROM metric_snapshots WHERE metric=? AND ts>=? ORDER BY ts ASC LIMIT ?",
+                (metric, since, limit)
+            )
+        else:
+            cur.execute(
+                "SELECT ts, value, detail FROM metric_snapshots WHERE metric=? ORDER BY ts ASC LIMIT ?",
+                (metric, limit)
+            )
+        rows = cur.fetchall()
+        result = []
+        for row in rows:
+            ts, value, detail_str = row
+            try:
+                detail = _json.loads(detail_str) if detail_str else {}
+            except Exception:
+                detail = {}
+            result.append({"ts": ts, "value": value, "detail": detail})
+        return result
+
+    def prune_snapshots(self, keep_days: float = 30) -> int:
+        """清理过期的快照记录"""
+        cur = self._conn.cursor()
+        cutoff = time.time() - keep_days * 86400
+        cur.execute("DELETE FROM metric_snapshots WHERE ts < ?", (cutoff,))
+        self._conn.commit()
+        return cur.rowcount
+
+    def list_ingest(self, limit: int = 500, offset: int = 0) -> list[dict]:
+        """列出最近的摄入日志"""
+        cur = self._conn.cursor()
+        cur.execute(
+            "SELECT ts, entry_id, state, title FROM ingest_log ORDER BY id DESC LIMIT ? OFFSET ?",
+            (limit, offset)
+        )
+        rows = cur.fetchall()
+        return [
+            {"ts": r[0], "entry_id": r[1], "state": r[2], "title": r[3]}
+            for r in rows
+        ]
 
     def close(self) -> None:
         """关闭当前线程的数据库连接（各线程连接随线程结束自动释放）。"""
