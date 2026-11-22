@@ -50,9 +50,9 @@ RECALL_TOP_N = 20
 FINAL_TOP_K = 5
 
 # 重排权重（热度 / 新鲜度 / 语义相关度，三者之和为 1.0）
-RERANK_WEIGHT_HEAT = 0.25
-RERANK_WEIGHT_FRESH = 0.20
-RERANK_WEIGHT_SIM = 0.55
+RERANK_WEIGHT_HEAT = 0.10  # 历史热度权重（降低，避免热门旧内容干扰精准匹配）
+RERANK_WEIGHT_FRESH = 0.10  # 新鲜度权重（降低，避免新发布但低质内容干扰）
+RERANK_WEIGHT_SIM = 0.80  # 语义相似度权重（提高，优先匹配精准知识点）
 
 # 设备加权：检索时本机（meta.device_mac 匹配）条目的加分系数，
 # 叠加在归一化综合分之上（软加权：本机优先，不排除其他设备）。
@@ -343,6 +343,47 @@ def _apply_overrides(overrides: dict) -> None:
                 # 类型转换失败 -> 保留默认值，绝不崩溃
                 pass
 
+
+
+# ============================================================
+# v3 整改配置（P0：语义后端切换 + 阈值重标 + 场景锚定层）
+# 本块放在 _apply_overrides 之前，确保外部覆盖仍作用于全部常量。
+# ============================================================
+# --- 向量后端配置 (Ollama + bge-m3) ---
+EMBEDDING_BACKEND = "ollama"
+OLLAMA_EMBED_ENDPOINT = "http://127.0.0.1:11434"
+OLLAMA_EMBED_MODEL = "bge-m3"
+OLLAMA_EMBED_DIM = 1024
+OLLAMA_EMBED_TIMEOUT = 20.0
+SEMANTIC_SIM_CONTENT_CHARS = 300  # _semantic_sim 只取 title+正文前300字，避免长正文稀释
+
+# --- 阈值重标 (适配 bge-m3 值域) ---
+ABSTAIN_CONFIDENCE = 0.55
+NO_MATCH_STRENGTH = 0.30
+WEAK_STRENGTH_THRESHOLD = 0.50
+
+# --- 置信度融合权重 (动态归一化，只纳入有信号的项) ---
+CONF_W_STRENGTH = 0.55
+CONF_W_MARGIN = 0.15
+CONF_W_TAG = 0.15
+CONF_W_SCENE = 0.10
+CONF_W_ENTITY = 0.05
+
+# --- 场景锚定层 ---
+SCENE_DEFAULT = "global"
+SCENE_MATCH_WEAK = 0.30  # 条目场景与查询场景不符时的弱匹配分
+SCENE_RELAX_MIN = 2       # 场景硬过滤后候选少于该值时 relax 到 global
+ENTITY_ANCHOR_BOOST = 0.10
+SEMANTIC_CACHE_SIM = 0.92 # 语义缓存命中阈值
+TURNSTATE_MAX_TOKENS = 50 # 多轮指代状态预算
+
+# --- 标签策略 ---
+TAG_FILTER_MODE = "or_boost"  # 由后置AND减法改为前置OR召回+boost
+TAG_BOOST = 0.20
+
+# --- 数据生命周期 (淘汰加速，适配6天龄系统) ---
+COLD_DECAY_DAYS = 14.0
+ARCHIVE_DAYS = 30.0
 
 _apply_overrides(_load_external_overrides())
 

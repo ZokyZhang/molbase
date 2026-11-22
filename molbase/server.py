@@ -83,6 +83,11 @@ def _response_to_dict(resp: QueryResponse) -> dict[str, Any]:
         "content_chars": resp.content_chars,
         "confidence": resp.confidence,
         "abstain": resp.abstain,
+        # v3 场景锚定层新增字段：让 HTTP 调用方拿到场景/实体/短路状态（不再丢弃）
+        "scene_id": resp.scene_id,
+        "entities": resp.entities,
+        "resolved_version_id": resp.resolved_version_id,
+        "refs_miss": resp.refs_miss,
     }
 
 
@@ -314,7 +319,15 @@ class KBRequestHandler(BaseHTTPRequestHandler):
             client_ip = self.client_address[0] if self.client_address else "unknown"
             session_id = f"http::{client_ip}"
         device_mac = str(data.get("device_mac", "")).strip()
-        resp = self.orc.query(query, top_k=top_k, tags=tags, session_id=session_id, device_mac=device_mac)
+        # v3 场景锚定层：解析 scene 与 refs 参数（三级短路 Level1 file-grounded）
+        scene = str(data.get("scene", "")).strip()
+        refs = data.get("refs")
+        if refs is not None and not isinstance(refs, list):
+            refs = [str(refs)]
+        resp = self.orc.query(
+            query, top_k=top_k, tags=tags, session_id=session_id,
+            device_mac=device_mac, scene=scene, refs=refs,
+        )
         self._ok(_response_to_dict(resp))
 
     def _handle_feedback(self, data: dict[str, Any]) -> None:

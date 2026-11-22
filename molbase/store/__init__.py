@@ -254,6 +254,117 @@ class Store:
             )
         """)
         cur.execute("CREATE INDEX IF NOT EXISTS idx_snapshots_metric_ts ON metric_snapshots(metric, ts)")
+        # v3 场景锚定层：建6张表 + entries.scene 列（幂等，可安全重复调用）
+        self._create_scene_tables(conn)
+        conn.commit()
+
+    def _create_scene_tables(self, conn: sqlite3.Connection) -> None:
+        """
+        创建场景锚定层 6 张表，并为 entries 表幂等添加 scene 列。
+        包含：scenes, topic_tree, scene_entries, entity_index, knowledge_versions, semantic_cache。
+        """
+        cur = conn.cursor()
+
+        # 1. 创建 scenes 表：存储场景元数据
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS scenes (
+                scene_id TEXT PRIMARY KEY,
+                scene_path TEXT,
+                parent_id TEXT,
+                facets TEXT,
+                description TEXT,
+                status TEXT DEFAULT 'active',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # 2. 创建 topic_tree 表：存储场景内的主题树结构
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS topic_tree (
+                topic_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                topic_name TEXT,
+                parent_id INTEGER,
+                level INTEGER,
+                scene_id TEXT,
+                FOREIGN KEY (scene_id) REFERENCES scenes(scene_id)
+            )
+        """)
+
+        # 3. 创建 scene_entries 表：建立场景与 entries 的关联
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS scene_entries (
+                scene_id TEXT,
+                entry_id TEXT,
+                via TEXT,
+                weight REAL,
+                PRIMARY KEY (scene_id, entry_id),
+                FOREIGN KEY (entry_id) REFERENCES entries(entry_id)
+            )
+        """)
+
+        # 4. 创建 entity_index 表：实体索引，用于知识检索
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS entity_index (
+                entity TEXT,
+                entry_id TEXT,
+                knowledge_id TEXT,
+                source TEXT,
+                confidence REAL,
+                PRIMARY KEY (entity, entry_id),
+                FOREIGN KEY (entry_id) REFERENCES entries(entry_id)
+            )
+        """)
+
+        # 5. 创建 knowledge_versions 表：知识版本管理
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS knowledge_versions (
+                knowledge_id TEXT,
+                version_id TEXT,
+                scene_id TEXT,
+                answer_entry_id TEXT,
+                answer_digest TEXT,
+                facets_match TEXT,
+                authority REAL,
+                confidence REAL,
+                status TEXT DEFAULT 'active',
+                valid_from DATETIME DEFAULT CURRENT_TIMESTAMP,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (knowledge_id, version_id),
+                FOREIGN KEY (scene_id) REFERENCES scenes(scene_id),
+                FOREIGN KEY (answer_entry_id) REFERENCES entries(entry_id)
+            )
+        """)
+
+        # 6. 创建 semantic_cache 表：语义缓存，加速问答检索
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS semantic_cache (
+                q_key TEXT,
+                scene_id TEXT,
+                question_vec BLOB,
+                answer TEXT,
+                evidence_ids TEXT,
+                hit_count INTEGER DEFAULT 0,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (q_key, scene_id)
+            )
+        """)
+
+        # 幂等性操作：给 entries 表添加 scene 列，用于关联场景
+        self._ensure_column(conn, "entries", "scene", "TEXT DEFAULT 'global'")
+
+        # 创建常用查询索引
+        # 索引 scene_entries.scene_id：加速场景内条目查询
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_scene_entries_scene_id ON scene_entries(scene_id)")
+    
+        # 索引 entity_index.entity：加速实体检索
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_entity_index_entity ON entity_index(entity)")
+    
+        # 索引 knowledge_versions.scene_id：加速版本查询
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_knowledge_versions_scene_id ON knowledge_versions(scene_id)")
+    
+        # 索引 semantic_cache.scene_id：加速缓存命中查询
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_semantic_cache_scene_id ON semantic_cache(scene_id)")
+
         conn.commit()
 
     def _ensure_column(self, conn: sqlite3.Connection, table: str, column: str, decl: str) -> None:

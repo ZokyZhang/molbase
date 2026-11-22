@@ -18,7 +18,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
+import urllib.request
 from typing import Protocol, runtime_checkable
 
 
@@ -190,27 +192,127 @@ def is_near_duplicate(text1: str, text2: str, threshold: int = 3, dim: int = 64)
     return hamming_distance(simhash(text1, dim), simhash(text2, dim)) <= threshold
 
 
+class OllamaEmbedding:
+    """
+    Ollama 向量嵌入提供者。
+    仅使用标准库 urllib.request 和 json 进行网络通信。
+    """
+    name = "ollama"
+    
+    def __init__(self, endpoint: str, model: str, dim: int = 1024, timeout: float = 20.0) -> None:
+        """
+        初始化 Ollama 嵌入器。
+        :param endpoint: Ollama 服务地址 (例如 http://localhost:11434)
+        :param model: 使用的模型名称
+        :param dim: 期望的向量维度 (用于校验)
+        :param timeout: 请求超时时间 (秒)
+        """
+        self.endpoint = endpoint
+        self.model = model
+        self.dim = dim
+        self.timeout = timeout
+        self._cache: dict[str, list[float]] = {}
+        # 缓存上限
+        self._CACHE_MAX_SIZE = 2000
+
+    def _api_url(self) -> str:
+        """
+        构造 API 请求 URL。
+        :return: 拼接好的 embed 接口地址
+        """
+        return self.endpoint.rstrip('/') + '/api/embed'
+
+    def embed(self, text: str) -> list[float]:
+        """
+        获取文本的向量表示。
+        1. 检查实例级缓存，命中则直接返回。
+        2. 否则发起 POST 请求获取向量。
+        3. 解析响应并归一化。
+        4. 更新缓存（若超限则清空）。
+        :param text: 输入文本
+        :return: 归一化后的向量列表
+        """
+        # 1. 缓存命中检查
+        if text in self._cache:
+            return self._cache[text]
+
+        # 2. 发起网络请求
+        try:
+            url = self._api_url()
+            payload = {"model": self.model, "input": [text]}
+            
+            req = urllib.request.Request(
+                url,
+                data=json.dumps(payload).encode('utf-8'),
+                headers={'Content-Type': 'application/json'},
+                method='POST'
+            )
+            
+            with urllib.request.urlopen(req, timeout=self.timeout) as response:
+                data = json.loads(response.read().decode('utf-8'))
+                
+                # 3. 解析 embeddings 字段 (取第一个向量)
+                embeddings = data["embeddings"][0]
+                
+                # 4. 归一化
+                normalized_vec = _l2_normalize(embeddings)
+                
+                # 5. 更新缓存 (超限清空)
+                if len(self._cache) >= self._CACHE_MAX_SIZE:
+                    self._cache.clear()
+                self._cache[text] = normalized_vec
+                
+                return normalized_vec
+                
+        except Exception:
+            # 任何异常向上传播，由 create_embedder 捕获并降级
+            raise
+
+
 def create_embedder(backend: str = "hash", model_name: str | None = None) -> EmbeddingProvider:
     """
-    工厂函数：按后端名创建向量化器。
-
-    - backend="hash"：零模型确定性哈希（默认，永不失效）。
-    - backend="tfidf"：TF-IDF 加权哈希（需先 build(corpus)，零模型）。
-    - backend="sentence-transformers"：本地模型，失败自动降级回 hash。
-
-    任何异常都会降级回 HashEmbedding，保证「绝不崩溃」。
+    创建嵌入器实例。
+    :param backend: 后端类型 ("ollama", "tfidf", "sentence-transformers", "hash")
+    :param model_name: 模型名称 (仅对 ollama 和 sentence-transformers 有效)
+    :return: EmbeddingProvider 实例
     """
+    # 1. 优先判断 Ollama 后端
+    if backend == "ollama":
+        # 内部导入 config，避免循环依赖
+        from .config import OLLAMA_EMBED_ENDPOINT, OLLAMA_EMBED_DIM, OLLAMA_EMBED_TIMEOUT
+        
+        try:
+            # 使用配置中的默认模型，若未指定则使用 bge-m3
+            inst = OllamaEmbedding(
+                endpoint=OLLAMA_EMBED_ENDPOINT,
+                model=model_name or "bge-m3",
+                dim=OLLAMA_EMBED_DIM,
+                timeout=OLLAMA_EMBED_TIMEOUT
+            )
+            # 构造时探测服务不可用则降级
+            try:
+                inst.embed("ping")
+            except Exception as exc:
+                print(f"[molbase] Ollama 探测失败，降级 HashEmbedding: {exc}")
+                return HashEmbedding()
+            return inst
+        except Exception:
+            # 失败降级为 HashEmbedding，保证不崩溃
+            return HashEmbedding()
+    
+    # 2. Tfidf 后端
     if backend == "tfidf":
         return TfidfEmbedding()
+    
+    # 3. Sentence Transformers 后端
     if backend == "sentence-transformers":
         try:
             return SentenceTransformerEmbedding(model_name or "all-MiniLM-L6-v2")
         except Exception:
-            # 模型不可用/版本不匹配 -> 降级到零模型哈希向量
             return HashEmbedding()
-    # 默认（含 "hash"）走零模型哈希
+    
+    # 4. 默认返回 HashEmbedding
     return HashEmbedding()
-
 
 def cosine_similarity(a: list[float], b: list[float]) -> float:
     """余弦相似度（假设两向量已 L2 归一化，直接点积）。"""

@@ -99,8 +99,9 @@ class Reranker:
         if embedder is not None and query:
             try:
                 q_vec = embedder.embed(query)
+                from ..config import SEMANTIC_SIM_CONTENT_CHARS
                 sims = [
-                    cosine_similarity(q_vec, embedder.embed(h.entry.title + " " + h.entry.content))
+                    cosine_similarity(q_vec, embedder.embed(h.entry.title + " " + (h.entry.content or "")[:SEMANTIC_SIM_CONTENT_CHARS]))
                     for h in hits
                 ]
             except Exception:
@@ -108,7 +109,9 @@ class Reranker:
         else:
             sims = [h.score for h in hits]
 
-        sim_n = _normalize(sims)
+        # 语义分用绝对余弦（bge-m3 有量纲意义），不做相对归一化，
+        # 避免 0.70 与 0.66 的真实差距被抹平后被热度分反超。
+        sim_n = [max(0.0, min(1.0, s)) for s in sims]
         heat_n = _normalize(heats)
         fresh_n = _normalize(freshes)
 

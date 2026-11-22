@@ -89,9 +89,16 @@ from .websearch import SearchProvider, create_search_provider
 
 # 意图路由的 LLM 系统提示词（V2：语义分类；V1：规则兜底）
 _ROUTE_SYSTEM_PROMPT = (
-    "你是MolBase的意图路由器。根据用户查询判断意图，只输出 JSON。"
+    "你是 MolBase 的意图路由器。根据用户查询判断意图，只输出 JSON。"
     "route 取值：knowledge（知识/概念/做法）、code（代码/方法/函数/源码）、"
-    "skill（技能/工具/流程步骤）。格式：{\"route\":\"knowledge\",\"entities\":[\"关键词\"]}"
+    "skill（技能/工具/流程步骤）。"
+    "规则：knowledge 为默认兜底——任何不确定、泛泛的自然语言问题、概念、做法一律归为此类；"
+    "只有明确要写代码/查源码才选 code，明确要调用技能执行才选 skill。"
+    "entities：数组，抽取查询中的关键实体/专有名词（如工具名、项目名、人名、术语），最多 8 个。"
+    "scene：字符串，推断用户使用场景（如 qwen-worker、family-edu、运维排障、知识库建设），无法判断则输 'default'。"
+    "query_tags：数组，从受控词表 [运维，环境，配置，架构，规范，设计，业务，敏感，工具] 中选 0-3 个最相关标签。"
+    "输出格式示例：{\"route\":\"knowledge\",\"entities\":[\"关键词\"],\"scene\":\"default\",\"query_tags\":[]}"
+    "强调：只输出 JSON，不要解释、不要 markdown 代码块标记。"
 )
 
 # 生成式摘要的 LLM 系统提示词（V2：摘要压缩；V1：原文截断兜底）
@@ -154,7 +161,10 @@ class QueryResponse:
     content_chars: int = 0      # 本次返回内容的总字符数
     confidence: float = 0.0     # 综合置信度（0~1），低于阈值时 abstain=True（质量底线输出闸门）
     abstain: bool = False       # 是否「宁可不答也不错答」（内部召回置信不足）
-
+    scene_id: str = ""          # 本次查询解析出的场景锚点
+    entities: list = field(default_factory=list)  # 本次抽取的实体（不再丢弃）
+    resolved_version_id: str = ""  # 同问异答裁决出的版本 ID（无版本裁决时为空）
+    refs_miss: bool = False     # refs 硬约束未命中（用于调用方判断是否允许放宽）
 
 @dataclass
 class IngestResult:
@@ -258,6 +268,11 @@ class Orchestrator:
         if chosen == "hash":
             from .embedding import HashEmbedding
             return HashEmbedding(EMBEDDING_HASH_DIM)
+        # v3 修复：ollama 后端必须传 bge-m3 模型名，不能用 sentence-transformers 的
+        # EMBEDDING_MODEL_NAME（all-MiniLM-L6-v2），否则 Ollama 报 404、语义相似度恒为 0。
+        if chosen == "ollama":
+            from .config import OLLAMA_EMBED_MODEL
+            return create_embedder(chosen, OLLAMA_EMBED_MODEL)
         return create_embedder(chosen, EMBEDDING_MODEL_NAME)
 
     def _init_llm(
@@ -327,6 +342,211 @@ class Orchestrator:
         )
 
     # ------------------------------------------------------------------ 意图路由
+    def resolve_scene(self, scene_hint: str = "", session_id: str = "", query: str = "") -> str:
+        """
+        场景识别方法（优先级链）。
+        核心逻辑：scene 回答“你在什么场景下用它”，与 tags（“这是什么”）正交。
+        优先级顺序：显式传参 > 会话绑定 > 查询关键词推断 > 兜底 global。
+        全程 try/except 包裹，确保任何异常均降级返回 "global"，绝不崩溃。
+        """
+        try:
+            # 1. 显式传参最高优先
+            # 归一化：去除首尾空格并转为小写
+            if scene_hint and scene_hint.strip().lower() != "default":
+                return scene_hint.strip().lower()
+
+            # 2. 会话绑定检查
+            # 使用 hasattr 保护，防止 store 对象缺失 get_meta 方法导致崩溃
+            if session_id:
+                get_meta = getattr(self.store, "get_meta", None)
+                if get_meta:
+                    try:
+                        meta = get_meta(session_id)
+                        # 约定：返回 dict 或 None。若含 "scene" 键且非空，则返回该场景
+                        if isinstance(meta, dict) and meta.get("scene"):
+                            return meta["scene"]
+                    except Exception:
+                        # 任何异常视为无绑定，继续下一步
+                        pass
+
+            # 3. 查询关键词推断
+            # 若 query 非空，使用轻量规则匹配关键词，不重复调用 LLM
+            if query:
+                # 定义关键词到场景的映射常量
+                scene_keywords = {
+                    "qwen-worker": "qwen-worker",
+                    "family-edu": "family-edu",
+                    "生产环境": "production",
+                    "运维": "ops",
+                    "排障": "troubleshooting"
+                }
+                query_lower = query.lower()
+                for keyword, scene_id in scene_keywords.items():
+                    if keyword in query_lower:
+                        return scene_id
+
+            # 4. 兜底返回
+            return "global"
+
+        except Exception:
+            # 全局兜底：任何未捕获异常均返回 "global"，确保服务不崩溃
+            return "global"
+
+    def resolve_version(self, knowledge_id: str, scene_id: str = "") -> dict | None:
+            """
+            解析知识版本，根据场景匹配优先级和评分规则返回最佳版本。
+
+            优先级逻辑：
+            1. 精确场景匹配 (row.scene_id == scene_id)
+            2. 父场景继承 (row.scene_id 以 scene_id + '/' 开头)
+            3. 全局/默认场景 (row.scene_id in ('global', 'default', ''))
+            4. 全部 active 兜底
+
+            同组排序规则 (必须正确)：
+            - 第一关键字：authority * confidence (降序，大者优先)
+            - 第二关键字：valid_from (字符串字典序降序，'2026-11-23' > '2026-11-22')
+            - 实现方式：使用正值 + reverse=True，严禁对字符串取负。
+
+            Authority 来源说明：
+            - 用户拍板 1.0
+            - 已验证 0.9
+            - 文档推断 0.7
+            - 通用 0.5
+            """
+            try:
+                # 获取所有 active 状态的版本记录
+                rows = self.store._conn.execute(
+                    "SELECT * FROM knowledge_versions WHERE knowledge_id=? AND status='active'",
+                    (knowledge_id,)
+                ).fetchall()
+
+                if not rows:
+                    return None
+
+                # 定义优先级分组函数
+                def get_priority_group(row: sqlite3.Row, target_scene: str) -> int:
+                    scene = row["scene_id"]
+                    # 1. 精确匹配
+                    if scene == target_scene:
+                        return 0
+                    # 2. 父场景继承 (scene 以 target_scene + '/' 开头)
+                    if target_scene and scene.startswith(target_scene + "/"):
+                        return 1
+                    # 3. 全局/默认场景
+                    if scene in ("global", "default", ""):
+                        return 2
+                    # 4. 其他场景 (不匹配当前目标，放入兜底组)
+                    return 3
+
+                # 处理每一行数据
+                processed_items = []
+                for row in rows:
+                    # 转换为字典
+                    item = dict(row)
+
+                    # 计算评分：authority * confidence
+                    # 使用 float 处理，默认值为 0
+                    auth = float(item.get("authority", 0) or 0)
+                    conf = float(item.get("confidence", 0) or 0)
+                    item["_score"] = auth * conf
+
+                    # 提取时间字符串，用于字典序比较
+                    # 注意：字符串时间字典序即时间序，禁止取负
+                    item["_valid_from"] = str(item.get("valid_from", "") or "")
+
+                    processed_items.append(item)
+
+                # 按优先级分组
+                groups = {0: [], 1: [], 2: [], 3: []}
+                for item in processed_items:
+                    priority = get_priority_group(item, scene_id)
+                    groups[priority].append(item)
+
+                # 定义排序键：(score, valid_from)，使用 reverse=True 实现降序
+                # 严禁对字符串取负，直接使用正值 + reverse=True
+                def sort_key(d: dict):
+                    return (d["_score"], d["_valid_from"])
+
+                # 对每个非空组进行排序
+                best_version = None
+                for priority in [0, 1, 2, 3]:
+                    group = groups[priority]
+                    if not group:
+                        continue
+
+                    # 正确写法：正值 + reverse=True，一次到位
+                    group.sort(key=sort_key, reverse=True)
+
+                    # 取该组第一个元素
+                    if group:
+                        best_version = group[0]
+                        break # 找到最高优先级组后直接返回
+
+                if best_version is None:
+                    return None
+
+                # 返回结果，剔除下划线开头的临时字段
+                result = {k: v for k, v in best_version.items() if not k.startswith("_")}
+                return result
+
+            except Exception:
+                # 捕获任何异常，返回 None
+                return None
+
+    def _route_full(self, query: str, scene_hint: str = "") -> dict:
+        """
+        结构化路由方法：返回包含 route、entities、scene、query_tags 的完整字典。
+        设计目的：解决旧版 _route_llm 丢弃 entities/scene/query_tags 导致信息利用率低的问题。
+        即使 entities 在全库中仅出现 1 次，保留其上下文对后续技能调用至关重要。
+        """
+        # 1. 定义默认返回结构，确保异常或无 LLM 时仍有基础路由结果
+        default_result = {
+            "route": self._route_rules(query),
+            "entities": [],
+            "scene": scene_hint or "global",
+            "query_tags": []
+        }
+
+        # 2. 若 LLM 可用，尝试获取更丰富的结构化数据
+        if self.llm is not None:
+            try:
+                t0 = now_ms()
+                data = self.llm.complete_json(_ROUTE_SYSTEM_PROMPT, query)
+
+                # 解析 LLM 返回的数据
+                if data:
+                    # 2.1 处理 route：若 LLM 输出合法 (knowledge/code/skill)，则覆盖默认规则结果
+                    route_val = data.get("route")
+                    if route_val in ("knowledge", "code", "skill"):
+                        default_result["route"] = route_val
+
+                    # 2.2 处理 entities：若为列表，取前 8 个字符串元素
+                    entities_val = data.get("entities")
+                    if isinstance(entities_val, list):
+                        default_result["entities"] = [str(e) for e in entities_val[:8]]
+
+                    # 2.3 处理 query_tags：若为列表，取前 3 个字符串元素
+                    tags_val = data.get("query_tags")
+                    if isinstance(tags_val, list):
+                        default_result["query_tags"] = [str(t) for t in tags_val[:3]]
+
+                    # 2.4 处理 scene：显式 hint 优先，其次 LLM 推断，最后默认 global
+                    if scene_hint:
+                        default_result["scene"] = scene_hint
+                    elif data.get("scene"):
+                        default_result["scene"] = data["scene"]
+                    # 否则保持 default_result["scene"] 为 "global"
+
+                # 可选：埋点记录（若需要，此处注释掉以避免重复，或取消注释使用）
+                # self._trace_llm("意图路由(full)", t0, _ROUTE_SYSTEM_PROMPT, query, json.dumps(data, ensure_ascii=False) if data else "")
+
+            except Exception:
+                # 3. 任何异常直接降级，返回默认字典，保证程序不崩溃
+                pass
+
+        # 4. 返回最终结果
+        return default_result
+
     def _route(self, query: str) -> str:
         """
         意图路由：LLM 语义分类优先，规则兜底。
@@ -360,18 +580,37 @@ class Orchestrator:
 
     def _route_rules(self, query: str) -> str:
         """
-        规则版意图路由（零模型兜底）：
-        - 含「方法/函数/代码/源码/调用」关键词 -> code
-        - 含「技能/skill/流程/步骤」关键词 -> skill
-        - 其余 -> knowledge
+        路由规则判定函数。
+        逻辑：默认归为 knowledge，仅当命中强信号词时分别归为 code 或 skill。
+        已移除弱词（如单独的方法、函数、调用、步骤）的误判逻辑。
         """
-        q = query.lower()
-        code_kw = ("方法", "函数", "代码", "源码", "调用", "method", "function", "code", "def ")
-        skill_kw = ("技能", "skill", "流程", "步骤", "how to")
-        if any(k in q for k in code_kw):
-            return "code"
-        if any(k in q for k in skill_kw):
-            return "skill"
+        # 强代码信号词列表：明确指向编写代码、查看源码或具体代码片段
+        code_keywords = {"源码", "代码块", "函数名", "def ", "class ", "import ", "```", "编译", "调试代码"}
+    
+        # 强技能信号词列表：明确指向技能包、执行流程或工具调用步骤
+        skill_keywords = {"技能包", "执行步骤", "工具调用流程", "skill 包", "how to"}
+    
+        # 将查询转换为小写以便统一匹配英文关键词
+        query_lower = query.lower()
+    
+        # 1. 检查强代码信号
+        # 处理中文关键词直接命中
+        for kw in code_keywords:
+            if kw in query:
+                return "code"
+        # 处理英文关键词 (def, class, import)
+        for kw in ["def", "class", "import"]:
+            if kw in query_lower:
+                return "code"
+            
+        # 2. 检查强技能信号
+        for kw in skill_keywords:
+            if kw in query:
+                return "skill"
+            
+        # 3. 默认兜底
+        # 此时即使包含“函数”、“调用”、“步骤”等弱词，只要没有命中上述强信号，
+        # 一律视为知识查询 (knowledge)
         return "knowledge"
 
     def _trace_llm(self, stage: str, t0: float, system: str, user: str, out_text: str) -> None:
@@ -416,32 +655,177 @@ class Orchestrator:
             pass  # 模型不可用 -> 降级用原查询
         return query
 
-    def _filter_by_route(
-        self, results: list[Any], route: str
-    ) -> list[Any]:
+    def _filter_by_route(self, results: list[Any], route: str) -> list[Any]:
         """
-        按路由类型过滤结果：code/skill 精确匹配；knowledge 不限制（允许混合）。
+        按路由类型对结果进行软优先重排，不再硬过滤丢弃条目。
+    
+        修复逻辑：
+        1. 移除原有的列表推导硬过滤，确保召回池中的知识条目不被丢弃。
+        2. 使用稳定排序 (stable sort) 根据 entry_type 优先级重新排列结果。
+        3. 优先级规则：
+           - 目标 route 类型 (如 skill/code/knowledge) 优先级为 0，排在最前。
+           - knowledge 类型 (当 route 非 knowledge 时) 优先级为 1，排在中间。
+           - 其他类型优先级为 2，排在最后。
+        4. 当 route == "knowledge" 时，knowledge 条目优先级为 0，code/skill 等靠后。
+    
+        此策略保证召回池长度不变，仅调整顺序，避免空召回导致的弃答。
         """
-        if route == "knowledge":
-            return results
-        return [r for r in results if r.entry.entry_type == route]
+        def get_priority(item: Any) -> int:
+            """
+            计算条目的排序优先级。
+            返回越小，排序越靠前。
+            """
+            entry_type = item.entry.entry_type
+            if entry_type == route:
+                return 0  # 目标类型，最高优先级
+            elif entry_type == "knowledge":
+                return 1  # 知识类型，次级优先级
+            else:
+                return 2  # 其他类型，最低优先级
+
+        # 使用 stable sort 保持同优先级内的相对顺序，仅按优先级重排
+        return sorted(results, key=get_priority)
+
+    def _filter_by_scene(self, results: list[Any], scene_id: str) -> list[Any]:
+            """
+            场景过滤：树收敛硬剪枝 + 冷场景 relax。
+            1. 若 scene_id 为空或 "global"，返回全部结果。
+            2. 过滤出 scene 匹配的条目。
+            3. 若结果少于 SCENE_RELAX_MIN，则补充 "global" 场景的条目（去重保序）。
+            4. 异常降级返回原结果。
+            """
+            from .config import SCENE_RELAX_MIN
+            try:
+                # 情况 1: 全局或空 ID，不过滤
+                if not scene_id or scene_id == "global":
+                    return results
+
+                # 情况 2: 正常过滤
+                filtered = []
+                for entry in results:
+                    # 安全获取 meta 和 scene
+                    try:
+                        meta = getattr(entry, "meta", None) or getattr(getattr(entry, "entry", None), "meta", {})
+                        if isinstance(meta, dict) and meta.get("scene", "global") == scene_id:
+                            filtered.append(entry)
+                    except (AttributeError, TypeError, KeyError):
+                        # 单个条目处理异常，跳过或保留，这里选择跳过该条目
+                        continue
+
+                # 情况 3: 冷场景 relax 逻辑
+                if len(filtered) < SCENE_RELAX_MIN:
+                    # 收集所有 scene 为 "global" 的条目
+                    global_entries = []
+                    for entry in results:
+                        try:
+                            meta = getattr(entry, "meta", None) or getattr(getattr(entry, "entry", None), "meta", {})
+                            if isinstance(meta, dict) and meta.get("scene", "global") == "global":
+                                global_entries.append(entry)
+                        except (AttributeError, TypeError, KeyError):
+                            continue
+
+                    # 合并去重并保持原顺序
+                    # 使用集合记录已添加的 entry 对象引用（假设 entry 对象可哈希或需唯一标识）
+                    # 由于 entry 可能是复杂对象，这里假设通过 id(entry) 去重
+                    seen_ids = set()
+                    merged = []
+                    for item in filtered + global_entries:
+                        item_id = id(item)
+                        if item_id not in seen_ids:
+                            seen_ids.add(item_id)
+                            merged.append(item)
+
+                    return merged
+
+                return filtered
+
+            except Exception:
+                # 兜底异常处理，返回原结果
+                return results
+
+    def _filter_by_refs(self, results: list[Any], refs: list[str] | None) -> list[Any]:
+            """
+            引用过滤：用户显式给文件参考时优先、命中即短路。
+            1. refs 为空，返回全部。
+            2. 保留 entry_id 或 source 命中任一 ref 的条目。
+            3. 异常降级返回原结果。
+            """
+            try:
+                # 情况 1: refs 为空，不过滤
+                if not refs:
+                    return results
+
+                filtered = []
+                for entry in results:
+                    try:
+                        # 获取 entry_id 和 source
+                        inner = getattr(entry, 'entry', entry)  # ScoredHit.entry 才是 Entry
+                        entry_id = getattr(inner, 'entry_id', None)
+                        source = getattr(inner, 'source', None)
+
+                        # 构建搜索字符串
+                        search_str = ""
+                        if entry_id:
+                            search_str += str(entry_id)
+                        if source:
+                            search_str += " " + str(source)
+
+                        # 命中判断：任一 ref 出现在搜索串中
+                        if any(ref in search_str for ref in refs):
+                            filtered.append(entry)
+                    except (AttributeError, TypeError, ValueError):
+                        # 单个条目属性访问异常，跳过
+                        continue
+
+                return filtered
+
+            except Exception:
+                # 兜底异常处理，返回原结果
+                return results
 
     def _filter_by_tags(self, results: list[Any], tags: list[str] | None) -> list[Any]:
         """
-        按 meta.tags 过滤（AND 语义：仅保留同时含全部指定标签的条目）。
-        tags 为空或全是空串时不过滤。
+        根据标签过滤或提升结果。
+        
+        修复说明：支持 or_boost 模式，命中标签的结果排前，未命中的保留但排后，避免误删召回。
         """
+        from .config import TAG_FILTER_MODE, TAG_BOOST
+        
         if not tags:
             return results
         want = [t.strip() for t in tags if t and str(t).strip()]
         if not want:
             return results
-        out = []
-        for r in results:
-            have = r.entry.meta.get("tags") or []
-            if all(t in have for t in want):
-                out.append(r)
-        return out
+        
+        if TAG_FILTER_MODE == "or_boost":
+            # 收集每个结果的标签命中数
+            scored_results = []
+            for r in results:
+                have = r.entry.meta.get("tags") or []
+                # 兼容 str 与 list
+                if isinstance(have, str):
+                    have = [have]
+                if not isinstance(have, list):
+                    have = []
+                
+                hit_count = sum(1 for t in want if t in have)
+                scored_results.append((r, hit_count))
+            
+            # stable sort: 命中数高的排前，命中数低的排后
+            scored_results.sort(key=lambda x: x[1], reverse=True)
+            return [r for r, _ in scored_results]
+        else:
+            # 保持原 AND 语义
+            out = []
+            for r in results:
+                have = r.entry.meta.get("tags") or []
+                if isinstance(have, str):
+                    have = [have]
+                if not isinstance(have, list):
+                    have = []
+                if all(t in have for t in want):
+                    out.append(r)
+            return out
 
     # ------------------------------------------------------------------ 对外查询
     def query(
@@ -451,28 +835,60 @@ class Orchestrator:
         tags: list[str] | None = None,
         session_id: str = "",
         device_mac: str = "",
+        scene: str = "",
+        refs: list[str] | None = None,
     ) -> QueryResponse:
         """
         核心查询接口：意图路由 -> 召回 -> 重排 -> 最小上下文输出。
 
         tags：可选，按 meta.tags 过滤（AND 语义），用于按「运维/架构/敏感」等分类精准检索。
         session_id：可选会话标识，用于监控「每个会话走了哪几步、缺哪步」。
+        scene：场景提示，用于辅助意图识别和场景过滤。
+        refs：参考实体列表，用于三级短路之 Level1 过滤（实体锚点召回）。
         """
-        route = self._route(text)
+        # 结构化路由：获取 route、entities、query_tags 及 scene_id
+        route_info = self._route_full(text, scene_hint=scene)
+        route = route_info["route"]
+        entities = route_info.get("entities", [])
+        query_tags = route_info.get("query_tags", [])
+        scene_id = route_info.get("scene", "") or scene or "global"
 
-        # 查询改写：LLM 可用时把口语化查询改写成检索友好关键词（提升召回）
+        # 查询改写：LLM 可用时口语化→检索友好关键词（保留原有逻辑）
         search_text = self._rewrite(text)
 
-        # 召回（用改写后的查询）
+        # 场景识别：若 scene_id 仍是 "global" 且有 session_id，调用 resolve_scene 解析
+        if scene_id == "global" and session_id:
+            scene_id = self.resolve_scene(scene_hint=scene, session_id=session_id, query=text)
+
+        # 召回（用改写后的查询，激活图扩散）：尝试传入 seed_ids
         t_recall = now_ms()
-        hits = self.retriever.retrieve(
-            search_text, top_n=max(top_k * 4, 20), resolver=self._resolver
-        )
+        try:
+            hits = self.retriever.retrieve(
+                search_text,
+                top_n=max(top_k * 4, 20),
+                resolver=self._resolver,
+                seed_ids=entities,
+            )
+        except Exception:
+            # 异常时回退不传 seed_ids 的旧调用，保证兼容
+            hits = self.retriever.retrieve(
+                search_text,
+                top_n=max(top_k * 4, 20),
+                resolver=self._resolver,
+            )
 
-        # 路由过滤（knowledge 不过滤）
-        hits = self._filter_by_route(hits, route)
+        # 三级短路之 refs（Level1）：若 refs 非空，硬约束过滤（命中即短路，未命中标记 refs_miss）
+        refs_miss = False
+        if refs:
+            hits = self._filter_by_refs(hits, refs)
+            if not hits:
+                refs_miss = True
 
-        # 标签过滤（按 meta.tags，AND 语义，可选）
+        # 场景过滤（Level3 硬约束 + relax）
+        hits = self._filter_by_scene(hits, scene_id)
+
+        # 标签过滤：显式 tags 走 or_boost 软优先；LLM 解析的 query_tags 不参与硬过滤，
+        # 仅通过 _compute_confidence 作为软信号，避免误删召回（v3 标签链路修复）
         hits = self._filter_by_tags(hits, tags)
 
         # 保留 rerank 前的原始 BM25 得分，供「是否触发网络兜底」判断真实匹配强度
@@ -497,10 +913,10 @@ class Orchestrator:
                 note=f"embedding={getattr(self.embedder, 'name', 'none')}",
             )
 
-        # 路由类型优先级：knowledge 路由下，目标类型优先，避免无关技能/代码喧宾夺主
+        # 路由类型优先级：knowledge 路由下，类型仅作同分 tie-break，避免高分 skill 被低分 knowledge 挤掉
         if route == "knowledge":
             priority = {"knowledge": 0, "code": 1, "skill": 2}
-            ranked.sort(key=lambda r: (priority.get(r.entry.entry_type, 9), -r.score))
+            ranked.sort(key=lambda r: (-r.score, priority.get(r.entry.entry_type, 9)))
 
         # 组织返回 + 刷新新鲜度（touch）
         results: list[QueryResult] = []
@@ -557,7 +973,10 @@ class Orchestrator:
         baseline_tokens = recall_tokens
 
         # 质量底线（输出闸门）：综合置信度 + abstain 判定
-        confidence, strength, margin = self._compute_confidence(ranked, search_text)
+        # 置信度融合：传入标签/场景/实体信号（动态归一化，无信号项不干扰）
+        confidence, strength, margin = self._compute_confidence(
+            ranked, search_text, query_tags=query_tags, scene_id=scene_id, anchor_ids=entities
+        )
         abstain = confidence < ABSTAIN_CONFIDENCE
         # 弃答归因反馈：把「为什么拦」记下来，让弃答变成可整改的缺口信号，
         # 而非死胡同。reason 按整改方向分档，subreason 给出更细原因。
@@ -565,22 +984,30 @@ class Orchestrator:
             if not ranked:
                 reason, subreason = "no_data", "empty_recall"
             elif strength < NO_MATCH_STRENGTH:
-                reason, subreason = "no_data", "weak_semantic"   # 语义几乎不相关，等价没数据
+                reason, subreason = "no_data", "weak_semantic"
             elif strength < WEAK_STRENGTH_THRESHOLD:
-                reason, subreason = "weak_match", "low_strength"  # 弱相关但不准
+                reason, subreason = "weak_match", "low_strength"
             else:
-                reason, subreason = "ambiguous", "low_margin"     # 多条太像、区分度不足
+                reason, subreason = "ambiguous", "low_margin"
+            # 使用同源原始余弦 strength 替代归一化后的 score，消除量纲伪矛盾
             self.store.record_abstain(
                 query=text,
                 route=route,
                 reason=reason,
                 subreason=subreason,
                 recall_candidates=recall_candidates,
-                top1_score=round(ranked[0].score, 4) if ranked else 0.0,
+                top1_score=strength,
                 confidence=confidence,
                 session_id=session_id,
             )
 
+        # 版本裁决：按场景解析 top1 候选的权威版本，同问异答的关键锚点。
+        # 库内无版本数据时 resolve_version 返回 None，字段为空属正常。
+        resolved_version_id = ""
+        if ranked:
+            version_row = self.resolve_version(ranked[0].entry.entry_id, scene_id)
+            if version_row:
+                resolved_version_id = str(version_row.get("version_id", "") or "")
         resp = QueryResponse(
             route=route,
             results=results,
@@ -592,6 +1019,10 @@ class Orchestrator:
             content_chars=len(all_text),
             confidence=confidence,
             abstain=abstain,
+            scene_id=scene_id,
+            entities=entities,
+            resolved_version_id=resolved_version_id,
+            refs_miss=refs_miss,
         )
 
         # 会话级 token 台账：累计节省比例（baseline<=0 时 ledger 内部自动跳过）
@@ -613,38 +1044,35 @@ class Orchestrator:
 
     def _semantic_sim(self, query: str, entry: Entry) -> float:
         """
-        计算 query 与某条目的原始语义相似度（embedder 余弦，未归一化）。
-
-        用「未归一化的余弦值」而非重排里的 min-max 归一化分——归一化会把
-        弱命中也拉到接近 1，掩盖真实匹配强度。embedder 不可用/异常时返回 0
-        （保守，倾向 abstain，宁可不答也不错答）。
+        计算 query 与条目的原始语义余弦（未归一化），用于置信度。
+        正文截断前 N 字避免长文本稀释语义（title 完整保留）。
         """
+        # 从 config 导入正文截断字符数常量，避免顶部依赖问题
+        from .config import SEMANTIC_SIM_CONTENT_CHARS
+    
         if self.embedder is None:
             return 0.0
+    
         try:
+            # 将整篇正文塞进 embed 会导致长正文语义被稀释甚至余弦为负
+            # 实测 title+正文前300字区分度最佳，因此仅截取前 SEMANTIC_SIM_CONTENT_CHARS 个字符
+            entry_text = entry.title + " " + (entry.content or "")[:SEMANTIC_SIM_CONTENT_CHARS]
             q_vec = self.embedder.embed(query)
-            e_vec = self.embedder.embed(entry.title + " " + entry.content)
+            e_vec = self.embedder.embed(entry_text)
             return cosine_similarity(q_vec, e_vec)
         except Exception:
             return 0.0
 
-    def _compute_confidence(self, ranked: list[Any], query: str) -> tuple[float, float, float]:
+    def _compute_confidence(self, ranked: list[Any], query: str, query_tags: Optional[List[str]] = None, scene_id: str = "", anchor_ids: Optional[List[str]] = None) -> Tuple[float, float, float]:
         """
-        计算一次查询的综合置信度（0~1），供 abstain 闸门判断（质量底线输出侧）。
-
-        核心信号是「未归一化的原始语义余弦」（hash/tfidf embedding 下，真命中
-        通常 > 0.5，假命中接近 0），而非 BM25 绝对分或 min-max 归一化分——
-        后两者在大语料下都会整体抬升、无法区分真伪。
-
-        两因子（零模型、确定性、可解释）：
-        - 匹配强度 strength：query 与 top1 的原始语义余弦（clip 0~1，权重 0.7）；
-        - 唯一性 margin   ：top1 与 top2 语义余弦之差（权重 0.3）。
-
-        无命中时置信度为 0（必然 abstain）。
-
-        返回 (confidence, strength, margin)：后两者用于弃答归因（weak_strength
-        / low_margin），让「为什么拦」可解释、可整改。
+        计算置信度分数。
+        
+        修复说明：无标注信号不参与，避免误惩罚。
+        1. 标签信号：仅当 query_tags 非空且 top1 条目标签非空时参与计算。
+        2. 场景信号：仅当 top1 条目 meta 中确实存在非空 scene 字段时参与计算。
+        3. 实体信号：仅当 anchor_ids 非空且 top1 条目存在实体标注时参与计算。
         """
+        from .config import CONF_W_STRENGTH, CONF_W_MARGIN, CONF_W_TAG, CONF_W_SCENE, CONF_W_ENTITY, SCENE_MATCH_WEAK
         if not ranked:
             return 0.0, 0.0, 0.0
         cos_top1 = self._semantic_sim(query, ranked[0].entry)
@@ -653,7 +1081,47 @@ class Orchestrator:
         if len(ranked) >= 2:
             cos_top2 = self._semantic_sim(query, ranked[1].entry)
             margin = max(0.0, min(1.0, cos_top1 - cos_top2))
-        conf = 0.7 * strength + 0.3 * margin
+        terms: List[Tuple[float, float]] = [(strength, CONF_W_STRENGTH), (margin, CONF_W_MARGIN)]
+        
+        # 标签信号：仅当 query_tags 非空 且 top1 条目标签非空时 append 覆盖率；否则跳过
+        if query_tags:
+            entry_tags = ranked[0].entry.meta.get("tags", [])
+            # 确保 entry_tags 是列表且非空
+            if entry_tags and isinstance(entry_tags, list) and len(entry_tags) > 0:
+                query_tag_set = set(query_tags)
+                entry_tag_set = set(entry_tags)
+                cov = len(query_tag_set & entry_tag_set) / len(query_tag_set) if query_tag_set else 0.0
+                terms.append((cov, CONF_W_TAG))
+        
+        # 场景信号：仅当 top1 条目的 meta 中确实存在非空 scene 字段时 append
+        if scene_id and scene_id != "global":
+            entry_scene = ranked[0].entry.meta.get("scene")
+            # 只有当 scene 字段存在且非空时才参与计算，避免将未标注伪装成 global
+            if entry_scene is not None and entry_scene != "":
+                scene_score = 1.0 if entry_scene == scene_id else SCENE_MATCH_WEAK
+                terms.append((scene_score, CONF_W_SCENE))
+        
+        # 实体信号：仅当 anchor_ids 非空 且 top1 条目存在实体标注时 append
+        if anchor_ids:
+            entry_meta = ranked[0].entry.meta
+            # 检查 meta 中是否存在 entities 或 entity_ids 且非空
+            has_entity_annotation = False
+            entities_val = entry_meta.get("entities")
+            entity_ids_val = entry_meta.get("entity_ids")
+            if entities_val and isinstance(entities_val, (list, dict)) and len(entities_val) > 0:
+                has_entity_annotation = True
+            elif entity_ids_val and isinstance(entity_ids_val, (list, dict)) and len(entity_ids_val) > 0:
+                has_entity_annotation = True
+            
+            if has_entity_annotation:
+                entry_id = ranked[0].entry.entry_id
+                entity_score = 1.0 if entry_id in anchor_ids else 0.0
+                terms.append((entity_score, CONF_W_ENTITY))
+        
+        if terms:
+            conf = sum(v * w for v, w in terms) / sum(w for _, w in terms)
+        else:
+            conf = 0.0
         return round(min(1.0, conf), 4), round(strength, 4), round(margin, 4)
 
     # ------------------------------------------------------------------ 网络搜索兜底
