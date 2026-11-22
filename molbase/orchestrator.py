@@ -30,11 +30,16 @@ from .config import (
     ARCHIVE_DAYS,
     ARCHIVE_HEAT_MAX,
     AUTO_HIT_HEAT,
+    BACKFILL_BATCH,
+    COMPACT_ENABLED,
+    COMPACT_MODE,
     CONFLICT_DUPLICATE_SIM,
+    COST_INPUT_PER_1M,
     EMBEDDING_BACKEND,
     EMBEDDING_HASH_DIM,
     EMBEDDING_MODEL_NAME,
     EVOLVE_INTERVAL,
+    EXPAND_CACHE_SIZE,
     FEEDBACK_WEIGHT_ADOPT,
     FEEDBACK_WEIGHT_CITE,
     FEEDBACK_WEIGHT_HIT,
@@ -44,11 +49,13 @@ from .config import (
     LLM_ENDPOINT,
     LLM_MAX_TOKENS,
     LLM_MODEL,
+    LLM_PROTOCOL,
     LLM_REWRITE,
     LLM_TEMPERATURE,
     LLM_TIMEOUT,
     QUARANTINE_REJECT_THRESHOLD,
     SKILLS_DIR,
+    SUMMARY_MAX_CHARS,
     TOKEN_TRACE,
     TOOL_TRACE_FINGERPRINT_MIN_LEN,
     TOOL_TRACE_GENERATE_THRESHOLD,
@@ -57,6 +64,8 @@ from .config import (
     WEB_SEARCH_TIMEOUT,
     WEB_SEARCH_TOP_N,
     WEB_SEARCH_TRIGGER_SCORE,
+    NO_MATCH_STRENGTH,
+    WEAK_STRENGTH_THRESHOLD,
     ensure_dirs,
 )
 from .code import CodeIndexer
@@ -73,7 +82,7 @@ from .llm import LocalLLM, create_llm
 from .profiler import Profiler, now_ms
 from .retrieval import Reranker, Retriever
 from .skills import SkillRegistry
-from .summarize import split_blocks, split_sentences, textrank_summarize
+from .summarize import split_blocks, split_sentences, semantic_preserve, textrank_summarize
 from .store import Entry, Store
 from .tokens import TokenLedger, estimate_tokens
 from .websearch import SearchProvider, create_search_provider
@@ -128,6 +137,7 @@ class QueryResult:
     source: str
     score: float
     meta: dict = field(default_factory=dict)
+    summary: str = ""  # 语义保持摘要（空=未生成，回退返回原文）
 
 
 @dataclass
@@ -273,6 +283,7 @@ class Orchestrator:
             timeout=LLM_TIMEOUT,
             temperature=LLM_TEMPERATURE,
             max_tokens=LLM_MAX_TOKENS,
+            protocol=LLM_PROTOCOL,
         )
 
     # ------------------------------------------------------------------ 索引构建
@@ -438,11 +449,14 @@ class Orchestrator:
         text: str,
         top_k: int = FINAL_TOP_K,
         tags: list[str] | None = None,
+        session_id: str = "",
+        device_mac: str = "",
     ) -> QueryResponse:
         """
         核心查询接口：意图路由 -> 召回 -> 重排 -> 最小上下文输出。
 
         tags：可选，按 meta.tags 过滤（AND 语义），用于按「运维/架构/敏感」等分类精准检索。
+        session_id：可选会话标识，用于监控「每个会话走了哪几步、缺哪步」。
         """
         route = self._route(text)
 
@@ -466,7 +480,7 @@ class Orchestrator:
 
         # 重排（传入 embedder，模型失效时内部自动降级为 BM25）
         t_rerank = now_ms()
-        ranked = self.reranker.rerank(hits, embedder=self.embedder, query=search_text)
+        ranked = self.reranker.rerank(hits, embedder=self.embedder, query=search_text, device_mac=device_mac)
 
         # 性能埋点：召回 / 重排（代工环节，不消耗模型 token）
         if self.profiler is not None:
@@ -505,6 +519,7 @@ class Orchestrator:
                     source=r.entry.source,
                     score=round(r.score, 4),
                     meta=r.entry.meta,
+                    summary=r.entry.summary,
                 )
             )
         # 记录共现 + 节流触发进化（自我进化闭环，全自动，无需人工）
@@ -528,15 +543,43 @@ class Orchestrator:
                     note=f"兜底{len(web_results)}条",
                 )
 
-        # token 埋点：粗估本次返回内容与「全表扫描」基线的 token 数
+        # token 埋点：粗估本次返回内容与「召回候选全集」基线的 token 数
         all_text = "".join(r.title + " " + r.content for r in results)
         all_text += "".join(r.title + " " + r.content for r in web_results)
         token_estimate = estimate_tokens(all_text) if TOKEN_TRACE else 0
-        baseline_tokens = self._baseline_tokens if TOKEN_TRACE else 0
+        # 真实基线 = 召回候选全集（rerank 前的候选）token，而非旧版「全库塞」：
+        # saved 反映「召回候选 -> 最小上下文」的真实收敛，不再是虚高的全库压缩率。
+        recall_candidates = len(raw_hits)
+        recall_tokens = (
+            estimate_tokens("".join(h.entry.title + " " + h.entry.content for h in raw_hits))
+            if TOKEN_TRACE else 0
+        )
+        baseline_tokens = recall_tokens
 
         # 质量底线（输出闸门）：综合置信度 + abstain 判定
-        confidence = self._compute_confidence(ranked, search_text)
+        confidence, strength, margin = self._compute_confidence(ranked, search_text)
         abstain = confidence < ABSTAIN_CONFIDENCE
+        # 弃答归因反馈：把「为什么拦」记下来，让弃答变成可整改的缺口信号，
+        # 而非死胡同。reason 按整改方向分档，subreason 给出更细原因。
+        if abstain:
+            if not ranked:
+                reason, subreason = "no_data", "empty_recall"
+            elif strength < NO_MATCH_STRENGTH:
+                reason, subreason = "no_data", "weak_semantic"   # 语义几乎不相关，等价没数据
+            elif strength < WEAK_STRENGTH_THRESHOLD:
+                reason, subreason = "weak_match", "low_strength"  # 弱相关但不准
+            else:
+                reason, subreason = "ambiguous", "low_margin"     # 多条太像、区分度不足
+            self.store.record_abstain(
+                query=text,
+                route=route,
+                reason=reason,
+                subreason=subreason,
+                recall_candidates=recall_candidates,
+                top1_score=round(ranked[0].score, 4) if ranked else 0.0,
+                confidence=confidence,
+                session_id=session_id,
+            )
 
         resp = QueryResponse(
             route=route,
@@ -562,6 +605,9 @@ class Orchestrator:
             actual_tokens=token_estimate,
             baseline_tokens=baseline_tokens,
             confidence=confidence,
+            recall_candidates=recall_candidates,
+            recall_tokens=recall_tokens,
+            session_id=session_id,
         )
         return resp
 
@@ -582,7 +628,7 @@ class Orchestrator:
         except Exception:
             return 0.0
 
-    def _compute_confidence(self, ranked: list[Any], query: str) -> float:
+    def _compute_confidence(self, ranked: list[Any], query: str) -> tuple[float, float, float]:
         """
         计算一次查询的综合置信度（0~1），供 abstain 闸门判断（质量底线输出侧）。
 
@@ -595,9 +641,12 @@ class Orchestrator:
         - 唯一性 margin   ：top1 与 top2 语义余弦之差（权重 0.3）。
 
         无命中时置信度为 0（必然 abstain）。
+
+        返回 (confidence, strength, margin)：后两者用于弃答归因（weak_strength
+        / low_margin），让「为什么拦」可解释、可整改。
         """
         if not ranked:
-            return 0.0
+            return 0.0, 0.0, 0.0
         cos_top1 = self._semantic_sim(query, ranked[0].entry)
         strength = max(0.0, min(1.0, cos_top1))
         margin = 0.0
@@ -605,7 +654,7 @@ class Orchestrator:
             cos_top2 = self._semantic_sim(query, ranked[1].entry)
             margin = max(0.0, min(1.0, cos_top1 - cos_top2))
         conf = 0.7 * strength + 0.3 * margin
-        return round(min(1.0, conf), 4)
+        return round(min(1.0, conf), 4), round(strength, 4), round(margin, 4)
 
     # ------------------------------------------------------------------ 网络搜索兜底
     def _should_web_search(self, hits: list[Any]) -> bool:
@@ -675,17 +724,24 @@ class Orchestrator:
         stats = self.evolution.learn()
         # 质量底线（进化侧）：死知识自动归档
         stats["archived"] = self.store.archive_dead(ARCHIVE_DAYS, ARCHIVE_HEAT_MAX)
+        # 进化日志：记录本次步进结果（建边/冷衰减/归档），驱动飞轮「进化」环节统计
+        self.store.record_evolve(
+            added_edges=int(stats.get("edges", 0)),
+            decayed=int(stats.get("cold_decayed", 0)),
+            archived=int(stats.get("archived", 0)),
+        )
         self._rebuild()  # 学习后重建关联图，让新发现的关联边生效
         return stats
 
     # ------------------------------------------------------------------ 上下文压缩
-    def summarize(self, text: str, max_chars: int = 200) -> str:
+    def summarize(self, text: str, max_chars: int = SUMMARY_MAX_CHARS) -> str:
         """
-        上下文压缩（代工层降 token，三级降级）：
-        - 本地大模型可用：生成式摘要（最精准，保留关键事实与步骤）；
-        - 否则 TextRank 抽取式摘要（零模型，保留高权重句子）；
-        - 再退化为按 max_chars 截断原文。
+        上下文压缩（代工层降 token）：
+        - 语义保持模式（默认）：去冗余 -> LLM 摘要 -> 硬事实校验兜底，语义 100% 不变；
+        - 有损模式（COMPACT_MODE=lossy）：LLM 生成式 -> TextRank 抽取式 -> 截断。
         """
+        if COMPACT_ENABLED and COMPACT_MODE == "semantic":
+            return semantic_preserve(text, max_chars=max_chars, llm=self.llm)
         if self.llm is not None:
             try:
                 t0 = now_ms()
@@ -707,17 +763,36 @@ class Orchestrator:
                 pass  # TextRank 异常 -> 降级截断
         return text if len(text) <= max_chars else text[:max_chars] + "…"
 
+    def expand(self, entry_id: str) -> Optional[Entry]:
+        """按需展开原文：凭 entry_id 拉全文，语义无损可逆。"""
+        return self.store.get(entry_id)
+
+    def backfill_summaries(self, limit: int = BACKFILL_BATCH) -> dict:
+        """批量回填存量摘要：找 summary 为空的条目逐个生成并回写。"""
+        entries = self.store.list_no_summary(limit)
+        done = 0
+        for e in entries:
+            try:
+                s = semantic_preserve(e.content, SUMMARY_MAX_CHARS, e.entry_id, self.llm)
+                if s:
+                    self.store.update_summary(e.entry_id, s)
+                    done += 1
+            except Exception:
+                continue
+        return {"scanned": len(entries), "backfilled": done}
+
     def chunk(self, text: str, max_chars: int = 500) -> list[str]:
         """智能切块：按段落/句子边界把长文本切成上下文块（零模型）。"""
         return split_blocks(text, max_chars=max_chars)
 
     # ------------------------------------------------------------------ 反馈闭环
-    def feedback(self, entry_id: str, action: str = "hit") -> None:
+    def feedback(self, entry_id: str, action: str = "hit", session_id: str = "") -> None:
         """
         反馈回写：action 取值 hit / adopt / cite / reject，累加对应热度权重。
 
         - hit / adopt / cite 为正反馈（热度上升）；
         - reject 为负反馈（热度下降，自然沉底）。
+        session_id：可选会话标识，用于监控飞轮「反馈」环节归属。
         """
         weight = {
             "hit": FEEDBACK_WEIGHT_HIT,
@@ -726,6 +801,8 @@ class Orchestrator:
             "reject": FEEDBACK_WEIGHT_REJECT,
         }.get(action, FEEDBACK_WEIGHT_HIT)
         self.store.add_heat(entry_id, weight)
+        # 反馈日志：记录动作（驱动飞轮「反馈」环节统计，而非只看接口调用次数）
+        self.store.record_feedback(session_id, entry_id, action)
         # 质量底线（进化侧）：reject 累计达到阈值 -> 自动隔离（不参与召回）
         if action == "reject":
             self._maybe_quarantine(entry_id)
@@ -767,6 +844,7 @@ class Orchestrator:
 
         # 1. pinned：人工固定的事实禁止被覆盖
         if existing and existing.meta.get("pinned"):
+            self.store.record_ingest(entry_id, "pinned", title)
             return IngestResult(
                 entry_id=entry_id, state="pinned", against_id=entry_id,
                 reason="已有条目被人工固定(pinned)，拒绝覆盖",
@@ -779,6 +857,7 @@ class Orchestrator:
             self.store.record_conflict(
                 entry_id, title, content, source, "同 ID 来源不同，可能矛盾"
             )
+            self.store.record_ingest(entry_id, "conflict", title)
             return IngestResult(
                 entry_id=entry_id, state="conflict", against_id=entry_id,
                 reason=f"与已有条目(来源={existing.source or '未知'})来源不同，已记录待裁决",
@@ -786,25 +865,126 @@ class Orchestrator:
 
         # 3. duplicate：同 ID 同源（或来源缺失）且内容近重复，无需重复写入
         if existing and self._is_duplicate(existing.content, content):
+            self.store.record_ingest(entry_id, "duplicate", title)
             return IngestResult(
                 entry_id=entry_id, state="duplicate", against_id=entry_id,
                 reason="与已有内容近重复，跳过写入",
             )
 
-        # 4. merge/new：正常写入
+        # 4. merge/new：正常写入（入库前生成语义保持摘要）
         state = "merge" if existing else "new"
+        self.store.record_ingest(entry_id, state, title)
+        summary = ""
+        if COMPACT_ENABLED:
+            try:
+                summary = semantic_preserve(content, SUMMARY_MAX_CHARS, entry_id, self.llm)
+            except Exception:
+                summary = ""
         self.store.upsert(
             Entry(
                 entry_type="knowledge",
                 entry_id=entry_id,
                 title=title,
                 content=content,
+                summary=summary,
                 source=source,
                 meta=meta,
             )
         )
         self._rebuild()
         return IngestResult(entry_id=entry_id, state=state)
+
+    def ingest_files(self, device_mac: str, files: list[dict]) -> dict:
+        """
+        将客户端上传的文件进行三级入库（raw / summary / index）。
+
+        参数:
+            device_mac: 发起加载的设备 MAC 标识（打进 meta.device_mac，检索时本机加权）。
+            files: 文件列表，每项包含 path / title / summary / content 字段。
+
+        返回:
+            包含文件数与各入库状态（new/merge/duplicate/conflict/pinned）计数的字典。
+        """
+        # 初始化状态计数器
+        stats = {
+            "files": 0,
+            "new": 0,
+            "merge": 0,
+            "duplicate": 0,
+            "conflict": 0,
+            "pinned": 0,
+        }
+
+        # 遍历每个文件
+        for file_info in files:
+            # 提取文件信息，设置默认值
+            path = file_info.get("path", "")
+            title = file_info.get("title", "") or path
+            summary = file_info.get("summary", "")
+            content = file_info.get("content", "")
+
+            # 路径或内容为空则跳过该文件
+            if not path or not content:
+                continue
+
+            # 增加文件计数
+            stats["files"] += 1
+
+            # 1. 入库 raw 级（原文）
+            raw_entry_id = f"device::{device_mac}::raw::{path}"
+            raw_meta = {
+                "device_mac": device_mac,
+                "level": "raw",
+                "source_path": path,
+            }
+            raw_result = self.ingest_knowledge(
+                entry_id=raw_entry_id,
+                title=title,
+                content=content,
+                source=path,
+                meta=raw_meta,
+            )
+            # 累加 raw 级的状态计数
+            stats[raw_result.state] += 1
+
+            # 2. 入库 summary 级（摘要），仅当 summary 非空时
+            if summary:
+                summary_entry_id = f"device::{device_mac}::summary::{path}"
+                summary_meta = {
+                    "device_mac": device_mac,
+                    "level": "summary",
+                    "source_path": path,
+                }
+                summary_result = self.ingest_knowledge(
+                    entry_id=summary_entry_id,
+                    title=title,
+                    content=summary,
+                    source=path,
+                    meta=summary_meta,
+                )
+                # 累加 summary 级的状态计数
+                stats[summary_result.state] += 1
+
+            # 3. 入库 index 级（索引）
+            index_content = f"# {title}\n路径: {path}\n设备: {device_mac}"
+            index_entry_id = f"device::{device_mac}::index::{path}"
+            index_meta = {
+                "device_mac": device_mac,
+                "level": "index",
+                "source_path": path,
+            }
+            index_result = self.ingest_knowledge(
+                entry_id=index_entry_id,
+                title=title,
+                content=index_content,
+                source=path,
+                meta=index_meta,
+            )
+            # 累加 index 级的状态计数
+            stats[index_result.state] += 1
+
+        # 返回统计结果
+        return stats
 
     # ------------------------------------------------------------------ 会话回写
     def harvest_session(
@@ -1259,6 +1439,15 @@ class Orchestrator:
             self.store.upsert(entry)
         self._rebuild()
 
+    def record_api_call(self, api: str) -> None:
+        """
+        记录一次接口调用（驱动「调用率」指标）。
+
+        由服务层在各 HTTP 接口入口调用，落库 api_calls 表，供监控大屏统计
+        真实调用分布（query/feedback/harvest/tooltrace/ingest/summarize/skill）。
+        """
+        self.store.record_api_call(api)
+
     def stats(self) -> dict[str, int]:
         """返回各类条目数量统计。"""
         counts = {"knowledge": 0, "code": 0, "skill": 0}
@@ -1277,20 +1466,25 @@ class Orchestrator:
         """
         return self.token_ledger.snapshot()
 
-    def metrics_stats(self, limit: int = 200) -> dict:
+    def metrics_stats(self, limit: int = 200, include_test: bool = False) -> dict:
         """
         返回持久化埋点统计（知识库本体 metrics 表，重启不丢）。
 
         这是「部署后实时监控」的数据源：聚合累计 token 节省 + 最近 N 条明细，
         由服务层 /metrics 接口透出，监控大屏据此可视化 token 优化趋势。
 
+        include_test=False（默认）时排除测试数据，只反映真实使用情况。
+
         返回结构：
-            aggregate  ：累计节省（queries/actual/baseline/saved/ratio/pct/conf 均值）
-            recent     ：最近 limit 条明细（倒序）
+            aggregate  ：累计节省 + 全口径真实效能（拦截率/abstain率/召回/匹配度）
+            recent     ：最近 limit 条明细（倒序，默认排除测试）
             ledger     ：会话级台账快照（本进程存活期内的实时累计）
+            api_calls  ：各接口真实调用分布（调用率）
+            tooltraces ：操作模式收敛统计
         """
-        aggregate = self.store.metric_aggregate()
-        recent = self.store.list_metrics(limit=limit)
+        aggregate = self.store.metric_aggregate(include_test=include_test)
+        recent = self.store.list_metrics(limit=limit, include_test=include_test)
+        api_calls = self.store.api_calls_aggregate(include_test=include_test)
         tooltraces = self.store.tooltrace_aggregate()
         tooltraces["auto_skill_count"] = sum(
             1 for e in self.store.all_entries()
@@ -1300,7 +1494,101 @@ class Orchestrator:
             "aggregate": aggregate,
             "recent": recent,
             "ledger": self.token_ledger.snapshot(),
+            "api_calls": api_calls,
             "tooltraces": tooltraces,
+        }
+
+    def memory_usage(self) -> dict:
+        """
+        读取当前进程运行内存 RSS（MB）。
+
+        Linux 优先读 /proc/self/status 的 VmRSS（当前真实常驻内存）；
+        Windows 用 ctypes 调 psapi.GetProcessMemoryInfo（零第三方依赖）；
+        两者都不可用时返回 0.0。
+        """
+        rss_mb = 0.0
+        # Linux：/proc/self/status 的 VmRSS（单位 KB）
+        try:
+            with open("/proc/self/status", "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.startswith("VmRSS:"):
+                        rss_mb = int(line.split()[1]) / 1024.0
+                        break
+        except Exception:
+            pass
+        # Windows：psapi.GetProcessMemoryInfo 读 WorkingSetSize（单位字节，零依赖）
+        if rss_mb <= 0.0:
+            try:
+                import ctypes
+                import os
+                from ctypes import wintypes
+                class _PMC(ctypes.Structure):
+                    _fields_ = [
+                        ("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD),
+                        ("PeakWorkingSetSize", ctypes.c_size_t), ("WorkingSetSize", ctypes.c_size_t),
+                        ("QuotaPeakPagedPoolUsage", ctypes.c_size_t), ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                        ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t), ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                        ("PagefileUsage", ctypes.c_size_t), ("PeakPagefileUsage", ctypes.c_size_t),
+                    ]
+                pmc = _PMC()
+                pmc.cb = ctypes.sizeof(pmc)
+                # OpenProcess 获取真实句柄（GetCurrentProcess 伪句柄在 ctypes 下会溢出）
+                _handle = ctypes.windll.kernel32.OpenProcess(0x0410, False, os.getpid())
+                try:
+                    ctypes.windll.psapi.GetProcessMemoryInfo(_handle, ctypes.byref(pmc), pmc.cb)
+                    rss_mb = pmc.WorkingSetSize / 1024.0 / 1024.0
+                finally:
+                    ctypes.windll.kernel32.CloseHandle(_handle)
+            except Exception:
+                pass
+        return {"rss_mb": round(rss_mb, 1)}
+
+    def overview(self) -> dict:
+        """
+        监控大屏聚合接口：一次返回大屏所需的全部指标。
+
+        返回结构：
+            token    ：累计 token 消耗与节省（actual/baseline/saved/ratio/queries）；
+            flywheel ：飞轮运转（查询→命中→反馈→进化→更准 各环节计数）；
+            ingest   ：入库结果分布（new/merge/duplicate/conflict/pinned）；
+            sessions ：会话链路（每会话走了哪几步、缺哪步）；
+            catalog  ：本体统计（数据量/标签分布/运行内存/图规模）。
+        """
+        agg = self.store.metric_aggregate()
+        auto_skills = sum(
+            1 for e in self.store.all_entries()
+            if e.entry_type == "skill" and e.meta.get("auto_generated")
+        )
+        abstain = self.store.abstain_aggregate()
+        return {
+            "token": {
+                "actual_tokens": agg["actual_tokens"],
+                "baseline_tokens": agg["baseline_tokens"],
+                "saved_tokens": agg["saved_tokens"],
+                "saved_ratio": agg["saved_ratio"],
+                "saved_ratio_pct": agg["saved_ratio_pct"],
+                "queries": agg["queries"],
+                "saved_cost": round(agg["saved_tokens"] / 1e6 * COST_INPUT_PER_1M, 4),
+            },
+            "flywheel": {
+                "queries": agg["queries"],
+                "hits_total": agg["hits_total"],
+                "feedback": self.store.feedback_aggregate(),
+                "evolve": self.store.evolve_aggregate(),
+                "auto_skills": auto_skills,
+                "intercept_rate": agg["intercept_rate"],
+                "abstain_rate": agg["abstain_rate"],
+            },
+            "abstain": abstain,
+            "ingest": self.store.ingest_aggregate(),
+            "writeback": self.store.writeback_recent(10),
+            "sessions": self.store.session_summary(),
+            "participation": self.store.session_participation(30),
+            "catalog": {
+                **self.stats(),
+                "tags": self.store.tag_stats(),
+                "memory": self.memory_usage(),
+            },
         }
 
     def close(self) -> None:

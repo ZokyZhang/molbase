@@ -27,13 +27,15 @@ import urllib.request
 
 class LocalLLM:
     """
-    OpenAI 兼容的本地大模型客户端（标准库实现，零第三方依赖）。
+    本地大模型客户端（标准库实现，零第三方依赖），支持两种协议：
 
-    通过 HTTP 调用本地推理服务的 /v1/chat/completions 接口，
-    适用于 Ollama（默认 http://localhost:11434/v1）、vLLM、llama.cpp 等。
+    - ollama-native：Ollama 原生 /api/chat，自动关思考（think=false），
+      qwen 等思考模型必须走此协议（OpenAI 兼容端点对思考模型不兼容，
+      关思考不生效，会导致正文为空或原样复制不压缩）。
+    - openai：OpenAI 兼容 /v1/chat/completions，vLLM/llama.cpp 通用。
     """
 
-    name = "local-openai"
+    name = "local-llm"
 
     def __init__(
         self,
@@ -42,28 +44,70 @@ class LocalLLM:
         timeout: float = 30.0,
         temperature: float = 0.0,
         max_tokens: int = 512,
+        protocol: str = "ollama-native",
     ) -> None:
         """
         初始化客户端（惰性：不联网，第一次 chat 才真正请求）。
 
-        endpoint   ：基础 URL，如 "http://localhost:11434/v1"（不含 /chat/completions）
+        endpoint   ：基础 URL，如 "http://localhost:11434/v1"（含或不含 /v1）
         model      ：模型名（即版本指纹，如 "qwen3.5-9b"），换模型/版本只改这一处
         timeout    ：单次请求超时秒数
         temperature：采样温度，0.0 表示确定性输出（降幻觉）
         max_tokens ：单次生成上限
+        protocol   ：协议名，ollama-native | openai
         """
         self.endpoint = endpoint.rstrip("/")
         self.model = model
         self.timeout = timeout
         self.temperature = temperature
         self.max_tokens = max_tokens
-        self._chat_url = self.endpoint + "/chat/completions"
+        self.protocol = protocol
+        # ollama-native：由 /v1 推导出 Ollama 原生 /api/chat 地址
+        if protocol == "ollama-native":
+            base = self.endpoint
+            if base.endswith("/v1"):
+                base = base[: -len("/v1")]
+            self._chat_url = base + "/api/chat"
+        else:
+            self._chat_url = self.endpoint + "/chat/completions"
 
     def chat(self, system: str, user: str) -> str:
         """
         发送一次对话，返回助手文本。失败（未启动/超时/版本不匹配）抛异常，
         由上层捕获后降级，绝不在此处吞错。
         """
+        if self.protocol == "ollama-native":
+            return self._chat_ollama(system, user)
+        return self._chat_openai(system, user)
+
+    def _chat_ollama(self, system: str, user: str) -> str:
+        """Ollama 原生 /api/chat：关思考（think=false），返回 message.content。"""
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "stream": False,
+            "think": False,
+            "options": {
+                "temperature": self.temperature,
+                "num_predict": self.max_tokens,
+            },
+        }
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            self._chat_url,
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+        return body["message"]["content"]
+
+    def _chat_openai(self, system: str, user: str) -> str:
+        """OpenAI 兼容 /v1/chat/completions，返回 choices[0].message.content。"""
         payload = {
             "model": self.model,
             "messages": [
@@ -111,6 +155,7 @@ def create_llm(
     timeout: float = 30.0,
     temperature: float = 0.0,
     max_tokens: int = 512,
+    protocol: str = "ollama-native",
 ) -> LocalLLM | None:
     """
     工厂函数：创建本地大模型客户端。
@@ -126,4 +171,5 @@ def create_llm(
         timeout=timeout,
         temperature=temperature,
         max_tokens=max_tokens,
+        protocol=protocol,
     )

@@ -35,8 +35,9 @@ import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
-from .config import SANITIZE_ENABLED, SERVER_AUTH_TOKEN, SERVER_HOST, SERVER_PORT
+from .config import COMPACT_ENABLED, SANITIZE_ENABLED, SERVER_AUTH_TOKEN, SERVER_HOST, SERVER_PORT
 from .orchestrator import Orchestrator, QueryResponse, QueryResult
 from .sanitize import sanitize_text
 
@@ -48,17 +49,23 @@ _DASHBOARD_PATH = Path(__file__).resolve().parent / "dashboard.html"
 # 序列化辅助
 # ---------------------------------------------------------------------------
 def _result_to_dict(r: QueryResult) -> dict[str, Any]:
-    """QueryResult -> JSON 可序列化 dict（输出前对 content 做 PII 脱敏）。"""
+    """QueryResult -> JSON 可序列化 dict（默认返回语义保持摘要，原文挂 full_content）。"""
     content = sanitize_text(r.content) if SANITIZE_ENABLED else r.content
-    return {
+    summary = sanitize_text(r.summary) if (SANITIZE_ENABLED and r.summary) else r.summary
+    d = {
         "entry_id": r.entry_id,
         "entry_type": r.entry_type,
         "title": r.title,
-        "content": content,
         "source": r.source,
         "score": r.score,
         "meta": r.meta,
     }
+    if COMPACT_ENABLED and summary:
+        d["content"] = summary
+        d["full_content"] = content
+    else:
+        d["content"] = content
+    return d
 
 
 def _response_to_dict(resp: QueryResponse) -> dict[str, Any]:
@@ -141,18 +148,31 @@ class KBRequestHandler(BaseHTTPRequestHandler):
         """GET：/health、/stats、/token、/metrics、/（监控大屏）。"""
         if not self._authed():
             return self._err(401, "unauthorized")
-        if self.path in ("/health", "/healthz"):
+        # 解析路径与 query string（如 /metrics?include_test=1 切换是否含测试数据）
+        parsed = urlparse(self.path)
+        path = parsed.path
+        qs = {k: v[0] for k, v in parse_qs(parsed.query).items()}
+        if path in ("/health", "/healthz"):
             return self._ok({"status": "ok", "stats": self.orc.stats()})
-        if self.path == "/stats":
+        if path == "/stats":
             return self._ok({
                 "stats": self.orc.stats(),
                 "token": self.orc.token_stats(),
             })
-        if self.path == "/token":
+        if path == "/token":
             return self._ok({"token": self.orc.token_stats()})
-        if self.path == "/metrics":
-            return self._ok(self.orc.metrics_stats())
-        if self.path in ("/", "/dashboard", "/index.html"):
+        if path == "/metrics":
+            include_test = qs.get("include_test", "0") in ("1", "true", "yes", "on")
+            return self._ok(self.orc.metrics_stats(include_test=include_test))
+        if path == "/overview":
+            return self._ok(self.orc.overview())
+        if path == "/gaps":
+            limit = int(qs.get("limit", "20"))
+            return self._ok({"gaps": self.orc.store.abstain_gaps(limit=limit)})
+        if path == "/writeback":
+            limit = int(qs.get("limit", "10"))
+            return self._ok({"writeback": self.orc.store.writeback_recent(limit=limit)})
+        if path in ("/", "/dashboard", "/index.html"):
             return self._serve_dashboard()
         return self._err(404, "not found")
 
@@ -178,25 +198,45 @@ class KBRequestHandler(BaseHTTPRequestHandler):
             return self._err(400, "invalid json body")
 
         path = self.path.rstrip("/")
+        # 记录接口调用（驱动「调用率」指标）：每次真实调用落库 api_calls
         if path == "/query":
+            self.orc.record_api_call("query")
             return self._handle_query(data)
         if path == "/feedback":
+            self.orc.record_api_call("feedback")
             return self._handle_feedback(data)
         if path == "/summarize":
+            self.orc.record_api_call("summarize")
             return self._handle_summarize(data)
         if path == "/skill":
+            self.orc.record_api_call("skill")
             return self._handle_skill(data)
         if path == "/ingest/knowledge":
+            self.orc.record_api_call("ingest")
             return self._handle_ingest_knowledge(data)
+        if path == "/ingest/files":
+            self.orc.record_api_call("ingest_files")
+            return self._handle_ingest_files(data)
         if path == "/harvest":
+            self.orc.record_api_call("harvest")
             return self._handle_harvest(data)
         if path == "/tooltrace":
+            self.orc.record_api_call("tooltrace")
             return self._handle_tooltrace(data)
+        if path == "/expand":
+            self.orc.record_api_call("expand")
+            return self._handle_expand(data)
+        if path == "/compact/backfill":
+            self.orc.record_api_call("backfill")
+            return self._handle_backfill(data)
+        if path == "/evolve":
+            self.orc.record_api_call("evolve")
+            return self._ok(self.orc.evolve())
         return self._err(404, "not found")
 
     # ---- 各接口处理器 ----
     def _handle_query(self, data: dict[str, Any]) -> None:
-        """检索最小上下文（可选 tags 按 meta.tags 过滤，AND 语义）。"""
+        """检索最小上下文（可选 tags 按 meta.tags 过滤，AND 语义；可选 session_id 归集会话；可选 device_mac 本机加权）。"""
         query = str(data.get("query", "")).strip()
         if not query:
             return self._err(400, "missing 'query'")
@@ -204,16 +244,27 @@ class KBRequestHandler(BaseHTTPRequestHandler):
         tags = data.get("tags")
         if tags is not None and not isinstance(tags, list):
             tags = [str(tags)]
-        resp = self.orc.query(query, top_k=top_k, tags=tags)
+        session_id = str(data.get("session_id", "")).strip()
+        if not session_id:
+            # HTTP 直连兜底：未显式传会话时按来源 IP 归集（无法区分同设备多会话；
+            # 精确的会话归集由 MCP 层进程级 session_id 保证，这里仅让直连调用可见）。
+            client_ip = self.client_address[0] if self.client_address else "unknown"
+            session_id = f"http::{client_ip}"
+        device_mac = str(data.get("device_mac", "")).strip()
+        resp = self.orc.query(query, top_k=top_k, tags=tags, session_id=session_id, device_mac=device_mac)
         self._ok(_response_to_dict(resp))
 
     def _handle_feedback(self, data: dict[str, Any]) -> None:
-        """回写反馈信号（hit/adopt/cite/reject）。"""
+        """回写反馈信号（hit/adopt/cite/reject；可选 session_id 归集会话）。"""
         entry_id = str(data.get("entry_id", "")).strip()
         action = str(data.get("action", "hit")).strip()
         if not entry_id:
             return self._err(400, "missing 'entry_id'")
-        self.orc.feedback(entry_id, action)
+        session_id = str(data.get("session_id", "")).strip()
+        if not session_id:
+            client_ip = self.client_address[0] if self.client_address else "unknown"
+            session_id = f"http::{client_ip}"
+        self.orc.feedback(entry_id, action, session_id=session_id)
         self._ok({"ok": True, "entry_id": entry_id, "action": action})
 
     def _handle_summarize(self, data: dict[str, Any]) -> None:
@@ -260,6 +311,22 @@ class KBRequestHandler(BaseHTTPRequestHandler):
             "reason": result.reason,
         })
 
+    def _handle_ingest_files(self, data: dict[str, Any]) -> None:
+        """批量摄入客户端上传的文件（三级 + 设备标识），返回统计。"""
+        # 提取并清理 device_mac 字段
+        device_mac = str(data.get("device_mac", "")).strip()
+        # 校验 device_mac 是否为空
+        if not device_mac:
+            return self._err(400, "missing 'device_mac'")
+        # 提取 files 字段并校验是否为非空列表
+        files = data.get("files")
+        if not isinstance(files, list) or len(files) == 0:
+            return self._err(400, "missing 'files' (list)")
+        # 调用编排器执行批量文件摄入
+        result = self.orc.ingest_files(device_mac, files)
+        # 返回成功响应（含编排器统计信息）
+        self._ok({"ok": True, **result})
+
     def _handle_harvest(self, data: dict[str, Any]) -> None:
         """会话回写：把整段会话提炼成一份核心资产沉淀回知识库。"""
         session_id = str(data.get("session_id", "")).strip()
@@ -299,6 +366,29 @@ class KBRequestHandler(BaseHTTPRequestHandler):
             "skill_id": result.skill_id,
             "reason": result.reason,
         })
+
+    def _handle_expand(self, data: dict[str, Any]) -> None:
+        """按需展开原文：凭 entry_id 返回原文全文 + 摘要。"""
+        entry_id = str(data.get("entry_id", "")).strip()
+        if not entry_id:
+            return self._err(400, "missing 'entry_id'")
+        entry = self.orc.expand(entry_id)
+        if entry is None:
+            return self._err(404, "not found")
+        content = sanitize_text(entry.content) if SANITIZE_ENABLED else entry.content
+        summary = sanitize_text(entry.summary) if (SANITIZE_ENABLED and entry.summary) else entry.summary
+        return self._ok({
+            "entry_id": entry.entry_id,
+            "title": entry.title,
+            "content": content,
+            "summary": summary,
+        })
+
+    def _handle_backfill(self, data: dict[str, Any]) -> None:
+        """批量回填存量摘要。"""
+        limit = int(data.get("limit", 50))
+        result = self.orc.backfill_summaries(limit)
+        return self._ok({"ok": True, **result})
 
     def log_message(self, format: str, *args: Any) -> None:
         """简化访问日志，避免刷屏。"""

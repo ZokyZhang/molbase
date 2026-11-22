@@ -54,6 +54,10 @@ RERANK_WEIGHT_HEAT = 0.25
 RERANK_WEIGHT_FRESH = 0.20
 RERANK_WEIGHT_SIM = 0.55
 
+# 设备加权：检索时本机（meta.device_mac 匹配）条目的加分系数，
+# 叠加在归一化综合分之上（软加权：本机优先，不排除其他设备）。
+DEVICE_BOOST = 0.15
+
 # 热度信号权重（命中 +1、采纳 +3、引用 +2）
 FEEDBACK_WEIGHT_HIT = 1
 FEEDBACK_WEIGHT_ADOPT = 3
@@ -106,6 +110,17 @@ TOOL_TRACE_FINGERPRINT_MIN_LEN = 2
 # 注意：confidence 基于「未归一化的原始语义余弦」（hash 下真命中 >0.5、假命中 ~0），
 #       阈值按当前 embedding 后端校准；换 sentence-transformers 等后端需重调。
 ABSTAIN_CONFIDENCE = 0.30
+
+# 弃答归因分档阈值（可解释反馈：为什么拦截、怎么整改）。
+# - strength < NO_MATCH_STRENGTH         ：语义几乎不相关，等价「没数据」→ 补数据；
+# - NO_MATCH_STRENGTH <= strength < WEAK_STRENGTH_THRESHOLD ：弱相关但不准 → 补更精准条目；
+# - strength >= WEAK_STRENGTH_THRESHOLD 且 conf < 阈值       ：多条太像、区分度不足 → 去重/细化。
+NO_MATCH_STRENGTH = 0.15
+
+# 弃答归因二级阈值：当 top1 的原始语义余弦（strength）低于该值时，
+# 弃答归因为 weak_strength（召回内容与查询相关性弱）；否则归因为
+# low_margin（top1/top2 区分度不足）。用于「为什么拦截、怎么整改」的可解释反馈。
+WEAK_STRENGTH_THRESHOLD = 0.35
 
 # 输入闸门：写入冲突判定参数（硬编码）。
 # - 内容相似度 >= CONFLICT_DUPLICATE_SIM：视为近重复（duplicate），跳过写入；
@@ -172,6 +187,11 @@ LLM_MAX_TOKENS = 512
 # True = 启用改写（提升召回，多一次 LLM 调用）；False = 关闭（直接用原查询检索）。
 LLM_REWRITE = True
 
+# 本地 LLM 协议：ollama-native（Ollama 原生 /api/chat，自动关思考 think=false，
+# qwen 等思考模型必须用此协议，否则 reasoning 吞 token 导致正文为空/不压缩）|
+# openai（OpenAI 兼容 /v1/chat/completions，vLLM/llama.cpp 通用）。
+LLM_PROTOCOL = "ollama-native"
+
 
 # ---------------------------------------------------------------------------
 # 网络搜索外部源适配器（硬编码，可插拔增强）
@@ -202,6 +222,23 @@ WEB_SEARCH_TRIGGER_SCORE = 2.0
 # 估算口径说明见 molbase/tokens.py：中文 1 字 ≈ 1 token，英文 4 字符 ≈ 1 token。
 # 是否在 query 响应中附带 token 埋点（token_estimate / baseline_tokens / content_chars）。
 TOKEN_TRACE = True
+
+
+# ---------------------------------------------------------------------------
+# 语义保持压缩参数（硬编码）
+# ---------------------------------------------------------------------------
+# 总开关：False 即回退现状（query 返回全文、不生成摘要），一键回滚
+COMPACT_ENABLED = True
+# 压缩模式：semantic（语义保持，默认）| lossy（现有有损：LLM生成式/TextRank/截断）
+COMPACT_MODE = "semantic"
+# 摘要上限（字符），超出继续压缩
+SUMMARY_MAX_CHARS = 500
+# 去冗余相似度阈值：两段 SimHash 相似度 >= 该值视为重复
+DEDUP_SIM_THRESHOLD = 0.90
+# /expand 按需展开的 LRU 缓存大小
+EXPAND_CACHE_SIZE = 128
+# 批量回填存量的单批大小
+BACKFILL_BATCH = 50
 
 
 # ---------------------------------------------------------------------------
@@ -285,8 +322,8 @@ def _load_external_overrides() -> dict:
             pass
     # 环境变量优先级更高：MOLBASE_ + 常量名
     for key, val in _os.environ.items():
-        if key.startswith("MOLBASE_") and len(key) > 3:
-            overrides[key[3:]] = val
+        if key.startswith("MOLBASE_") and len(key) > len("MOLBASE_"):
+            overrides[key[len("MOLBASE_"):]] = val
     return overrides
 
 
