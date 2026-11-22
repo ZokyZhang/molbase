@@ -161,7 +161,9 @@ class Retriever:
 
         hits: dict[str, ScoredHit] = {}
         # 1. BM25 召回
-        for h in self.bm25.search(query, RECALL_TOP_N):
+        # BM25 召回上限取两者较大值：调用方需要更大候选池时（如精准知识点深召回）
+        # 不能被固定 RECALL_TOP_N 卡住，否则语义最强但 BM25 排名靠后的条目永远召不回。
+        for h in self.bm25.search(query, max(RECALL_TOP_N, top_n)):
             hits[h.entry.entry_id] = h
 
         # 2. 图关联召回（seed 条目的一跳邻居）

@@ -640,6 +640,7 @@ class Orchestrator:
         - LLM 可用且 LLM_REWRITE 开启时，把口语化查询改写成检索友好关键词，
           去除寒暄语气词、补充同义词，提升 BM25/向量召回率；
         - LLM 不可用/超时/输出异常时，降级返回原查询，绝不崩溃。
+        - 中文提问被英译时保留原文，避免中文知识库召回失败。
         """
         if self.llm is None or not LLM_REWRITE:
             return query
@@ -648,6 +649,12 @@ class Orchestrator:
             rw = self.llm.chat(_REWRITE_SYSTEM_PROMPT, query)
             if rw and rw.strip():
                 rw = rw.strip()
+                # 中文保护：若原文含中文而改写结果不含中文，则丢弃改写结果
+                query_has_chinese = any('\u4e00' <= ch <= '\u9fff' for ch in query)
+                rw_has_chinese = any('\u4e00' <= ch <= '\u9fff' for ch in rw)
+                if query_has_chinese and not rw_has_chinese:
+                    print('[molbase] 查询改写丢失中文，保留原文以保证中文库召回')
+                    return query
                 # 性能埋点：查询改写（模型环节）
                 self._trace_llm("查询改写", t0, _REWRITE_SYSTEM_PROMPT, query, rw)
                 return rw
@@ -865,7 +872,7 @@ class Orchestrator:
         try:
             hits = self.retriever.retrieve(
                 search_text,
-                top_n=max(top_k * 4, 20),
+                top_n=max(top_k * 8, 40),
                 resolver=self._resolver,
                 seed_ids=entities,
             )
@@ -873,7 +880,7 @@ class Orchestrator:
             # 异常时回退不传 seed_ids 的旧调用，保证兼容
             hits = self.retriever.retrieve(
                 search_text,
-                top_n=max(top_k * 4, 20),
+                top_n=max(top_k * 8, 40),
                 resolver=self._resolver,
             )
 
@@ -896,7 +903,9 @@ class Orchestrator:
 
         # 重排（传入 embedder，模型失效时内部自动降级为 BM25）
         t_rerank = now_ms()
-        ranked = self.reranker.rerank(hits, embedder=self.embedder, query=search_text, device_mac=device_mac)
+        # 语义重排同样用用户原始提问：LLM 改写补充的泛化同义词会稀释语义排序，
+        # 把精准条目挤到后面（如 AI 批改模型选型被泛化成"深度学习/NLP"后错配架构设计）。
+        ranked = self.reranker.rerank(hits, embedder=self.embedder, query=text, device_mac=device_mac)
 
         # 性能埋点：召回 / 重排（代工环节，不消耗模型 token）
         if self.profiler is not None:
@@ -974,8 +983,10 @@ class Orchestrator:
 
         # 质量底线（输出闸门）：综合置信度 + abstain 判定
         # 置信度融合：传入标签/场景/实体信号（动态归一化，无信号项不干扰）
+        # 置信度用用户原始提问计算：LLM 改写会补充泛化同义词（如"深度学习/自然语言处理"），
+        # 稀释语义集中度导致真实相关条目 conf 被拉低误弃答。原文更贴近用户真实意图。
         confidence, strength, margin = self._compute_confidence(
-            ranked, search_text, query_tags=query_tags, scene_id=scene_id, anchor_ids=entities
+            ranked, text, query_tags=query_tags, scene_id=scene_id, anchor_ids=entities
         )
         abstain = confidence < ABSTAIN_CONFIDENCE
         # 弃答归因反馈：把「为什么拦」记下来，让弃答变成可整改的缺口信号，

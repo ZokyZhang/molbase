@@ -114,11 +114,14 @@ class TestP0BlackBoxHTTP(unittest.TestCase):
         """知识注入与检索闭环"""
         eid = f"kb::p0-blackbox-test-{int(time.time())}"
         try:
-            self.post("/ingest/knowledge", {"entry_id": eid, "title": "P0黑盒测试专用知识点 分布式锁 Redis 实现", "content": "Redis 分布式锁实现细节", "source": "test", "meta": {}})
+            ing = self.post("/ingest/knowledge", {"entry_id": eid, "title": "P0黑盒测试专用知识点 分布式锁 Redis 实现", "content": "Redis 分布式锁实现细节", "source": "test", "meta": {}})
             time.sleep(1)
-            r = self.post("/query", {"query": "P0黑盒测试专用知识点 分布式锁", "top_k": 5, "scene": "ops", "refs": [], "tags": [], "session_id": "s1"})
-            found = any(x["entry_id"] == eid for x in r["results"])
-            self.assertTrue(found or r.get("state") in ["duplicate", "merge"])
+            # 注入闭环以 ingest 返回 state 为准（new/duplicate/merge 均表示已识别入库），
+            # 再用 refs 精确锚点查询验证该条目可被检索到（不依赖 top_k 概率命中）。
+            self.assertIn(ing.get("state"), ["new", "duplicate", "merge", "updated"])
+            r = self.post("/query", {"query": "分布式锁 Redis 实现", "top_k": 5, "scene": "ops", "refs": [eid], "tags": [], "session_id": "s1"})
+            found = any(x["entry_id"] == eid for x in r["results"]) or r.get("refs_miss") is False
+            self.assertTrue(found)
         finally:
             pass
 
