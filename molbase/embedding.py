@@ -35,6 +35,10 @@ class EmbeddingProvider(Protocol):
         """把文本编码为 dim 维向量（需 L2 归一化）。"""
         ...
 
+    def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        """批量编码（默认逐条；支持批量的后端覆写此方法以降低延迟）。"""
+        ...
+
 
 def _l2_normalize(vec: list[float]) -> list[float]:
     """L2 归一化：使向量模长为 1，便于余弦相似度（点积）计算。"""
@@ -57,6 +61,10 @@ class HashEmbedding:
 
     name = "hash"
     dim = 256  # 默认 256 维，足够中小知识库使用
+
+    def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        """批量哈希编码：复用逐条实现，保持与 embed 完全一致。"""
+        return [self.embed(t) for t in texts]
 
     def __init__(self, dim: int = 256) -> None:
         """初始化哈希向量维度。"""
@@ -267,6 +275,46 @@ class OllamaEmbedding:
         except Exception:
             # 任何异常向上传播，由 create_embedder 捕获并降级
             raise
+
+    def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        """
+        批量编码：一次 POST 拿全部向量，把 rerank 的 N 次 HTTP 降为 1 次。
+
+        缓存命中的文本不发请求；未命中的去重后一次性提交；返回顺序与入参一致。
+        任何异常向上传播，由 rerank 的 try/except 回退 BM25。
+        """
+        if not texts:
+            return []
+        misses: list[str] = []
+        seen: set[str] = set()
+        for text in texts:
+            if text in self._cache:
+                continue
+            if text in seen:
+                continue
+            seen.add(text)
+            misses.append(text)
+        if misses:
+            payload = {"model": self.model, "input": misses}
+            req = urllib.request.Request(
+                self._api_url(),
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            # 标准库 urllib：一次请求拿整批向量（Ollama /api/embed 原生支持数组）
+            with urllib.request.urlopen(req, timeout=self.timeout) as response:
+                data = json.loads(response.read().decode("utf-8"))
+            embeddings = data.get("embeddings", [])
+            if len(embeddings) != len(misses):
+                raise ValueError(
+                    f"Ollama embeddings count {len(embeddings)} != inputs {len(misses)}"
+                )
+            for text, vec in zip(misses, embeddings):
+                if len(self._cache) >= self._CACHE_MAX_SIZE:
+                    self._cache.clear()
+                self._cache[text] = _l2_normalize(vec)
+        return [self._cache[text] for text in texts]
 
 
 def create_embedder(backend: str = "hash", model_name: str | None = None) -> EmbeddingProvider:

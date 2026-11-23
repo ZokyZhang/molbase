@@ -844,6 +844,7 @@ class Orchestrator:
         device_mac: str = "",
         scene: str = "",
         refs: list[str] | None = None,
+        label: str = "",
     ) -> QueryResponse:
         """
         核心查询接口：意图路由 -> 召回 -> 重排 -> 最小上下文输出。
@@ -852,7 +853,9 @@ class Orchestrator:
         session_id：可选会话标识，用于监控「每个会话走了哪几步、缺哪步」。
         scene：场景提示，用于辅助意图识别和场景过滤。
         refs：参考实体列表，用于三级短路之 Level1 过滤（实体锚点召回）。
+        label：全量明细监控标记（golden / negative / real），用于分组对比。
         """
+        t_start = now_ms()  # v6 全量延迟埋点：整条 query 链路起点
         # 结构化路由：获取 route、entities、query_tags 及 scene_id
         route_info = self._route_full(text, scene_hint=scene)
         route = route_info["route"]
@@ -989,6 +992,7 @@ class Orchestrator:
             ranked, text, query_tags=query_tags, scene_id=scene_id, anchor_ids=entities
         )
         abstain = confidence < ABSTAIN_CONFIDENCE
+        reason, subreason = "", ""  # v6：非弃答时也要落库，避免 detail 构造 NameError
         # 弃答归因反馈：把「为什么拦」记下来，让弃答变成可整改的缺口信号，
         # 而非死胡同。reason 按整改方向分档，subreason 给出更细原因。
         if abstain:
@@ -1050,6 +1054,39 @@ class Orchestrator:
             recall_candidates=recall_candidates,
             recall_tokens=recall_tokens,
             session_id=session_id,
+            detail={
+                "scene_id": scene_id,
+                "label": label,
+                "tags": tags or [],
+                "query_tags": query_tags,
+                "entities": entities,
+                "refs": refs or [],
+                "rewritten": search_text if search_text != text else "",
+                "rewrite_used": 1 if search_text != text else 0,
+                "resolved_version_id": resolved_version_id,
+                "refs_miss": 1 if refs_miss else 0,
+                "abstain": 1 if abstain else 0,
+                "abstain_reason": reason,
+                "abstain_subreason": subreason,
+                "strength": round(strength, 4),
+                "margin": round(margin, 4),
+                "top1_score": round(ranked[0].score, 4) if ranked else 0.0,
+                "top1_entry_id": ranked[0].entry.entry_id if ranked else "",
+                "top1_title": ranked[0].entry.title if ranked else "",
+                "hits_detail": [
+                    {"entry_id": r.entry.entry_id, "title": r.entry.title,
+                     "entry_type": r.entry.entry_type, "source": r.entry.source,
+                     "score": round(r.score, 4)}
+                    for r in ranked[:top_k]
+                ],
+                "web_results": len(web_results),
+                "embed_model": getattr(self.embedder, "model", getattr(self.embedder, "name", "")),
+                "embedding_backend": getattr(self.embedder, "name", EMBEDDING_BACKEND),
+                "latency_total_ms": now_ms() - t_start,
+                "latency_recall_ms": t_rerank - t_recall,
+                "latency_rerank_ms": now_ms() - t_rerank,
+                "confidence_threshold": ABSTAIN_CONFIDENCE,
+            },
         )
         return resp
 
@@ -1086,11 +1123,19 @@ class Orchestrator:
         from .config import CONF_W_STRENGTH, CONF_W_MARGIN, CONF_W_TAG, CONF_W_SCENE, CONF_W_ENTITY, SCENE_MATCH_WEAK
         if not ranked:
             return 0.0, 0.0, 0.0
-        cos_top1 = self._semantic_sim(query, ranked[0].entry)
+        # 性能：优先复用 rerank 阶段已算好的 sim_norm（同一次批量 embed 的结果），
+        # 避免 _semantic_sim 再逐条 embed 造成重复 HTTP；旧对象无该字段时回退原路径。
+        def _cos(i: int) -> float:
+            cached = getattr(ranked[i], "sim_norm", None)
+            if cached is not None:
+                return float(cached)
+            return self._semantic_sim(query, ranked[i].entry)
+
+        cos_top1 = _cos(0)
         strength = max(0.0, min(1.0, cos_top1))
         margin = 0.0
         if len(ranked) >= 2:
-            cos_top2 = self._semantic_sim(query, ranked[1].entry)
+            cos_top2 = _cos(1)
             margin = max(0.0, min(1.0, cos_top1 - cos_top2))
         terms: List[Tuple[float, float]] = [(strength, CONF_W_STRENGTH), (margin, CONF_W_MARGIN)]
         
@@ -2072,7 +2117,7 @@ class Orchestrator:
             },
         }
 
-    def metric_detail(self, metric: str, limit: int = 50, offset: int = 0, q: str = "", sort: str = "ts", order: str = "desc") -> dict:
+    def metric_detail(self, metric: str, limit: int = 50, offset: int = 0, q: str = "", sort: str = "ts", order: str = "desc", scene: str = "", label: str = "", abstain: str = "", include_test: bool = False) -> dict:
         """获取指定指标的详细信息"""
         # 参数归一化
         if not (1 <= limit <= 500):
@@ -2086,8 +2131,8 @@ class Orchestrator:
         metrics_map = {
             'token': {
                 'summary_fn': lambda: self.store.metric_aggregate(),
-                'raw_fn': lambda: self.store.list_metrics(1000),
-                'filter_fields': ('query', 'route'),
+                'raw_fn': lambda: self.store.list_metrics(1000, include_test=include_test),
+                'filter_fields': ('query', 'route', 'scene_id', 'label', 'tags', 'entities', 'abstain_reason', 'top1_title'),
                 'sort_fields': ('ts', 'actual_tokens', 'baseline_tokens', 'hits', 'confidence')
             },
             'flywheel': {
@@ -2100,8 +2145,8 @@ class Orchestrator:
                     'intercept_rate': self.store.metric_aggregate()['intercept_rate'],
                     'abstain_rate': self.store.metric_aggregate()['abstain_rate']
                 },
-                'raw_fn': lambda: self.store.list_metrics(1000),
-                'filter_fields': ('query', 'route'),
+                'raw_fn': lambda: self.store.list_metrics(1000, include_test=include_test),
+                'filter_fields': ('query', 'route', 'scene_id', 'label', 'tags', 'entities', 'abstain_reason', 'top1_title'),
                 'sort_fields': ('ts', 'hits', 'confidence')
             },
             'abstain': {
@@ -2186,6 +2231,14 @@ class Orchestrator:
                     if q_lower in str(''.join(r.get('missing', []) if isinstance(r.get('missing'), list) else r.get('missing', ''))).lower()
                 ]
 
+        # v6 全量明细：显式维度过滤（场景/标记/弃答）
+        if scene:
+            filtered = [r for r in filtered if str(r.get("scene_id", "")) == scene]
+        if label:
+            filtered = [r for r in filtered if str(r.get("label", "")) == label]
+        if abstain in ("1", "0"):
+            filtered = [r for r in filtered if int(r.get("abstain", 0) or 0) == int(abstain)]
+
         # 排序
         if sort not in cfg['sort_fields']:
             sort = 'ts'
@@ -2207,6 +2260,10 @@ class Orchestrator:
             "offset": offset,
             "items": items
         }
+
+    def metric_compare(self, group_by: str = "scene_id", include_test: bool = False, limit: int = 50) -> dict:
+        """全量明细对比：委托 store 按任意维度分组聚合。"""
+        return self.store.metric_compare(group_by=group_by, include_test=include_test, limit=limit)
 
     def alert_rules(self) -> dict:
         """返回告警规则定义"""

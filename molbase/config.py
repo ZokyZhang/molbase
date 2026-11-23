@@ -356,6 +356,10 @@ OLLAMA_EMBED_MODEL = "bge-m3"
 OLLAMA_EMBED_DIM = 1024
 OLLAMA_EMBED_TIMEOUT = 20.0
 SEMANTIC_SIM_CONTENT_CHARS = 300  # _semantic_sim 只取 title+正文前300字，避免长正文稀释
+# v6 性能：语义精排只对 BM25 召回池的前 N 条做向量推理（CPU 上每条约 16ms）。
+# 40 条全量精排需 600ms+；16 条虽快但会漏掉排名靠后的真实命中（实测 golden 6/8），
+# 折中 32 条：golden 8/8 且延迟约 400-500ms。未进窗口者语义分记 0，不用 BM25 冒充。
+SEMANTIC_RERANK_LIMIT = 32
 
 # --- 阈值重标 (适配 bge-m3 值域) ---
 ABSTAIN_CONFIDENCE = 0.55

@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 import time
@@ -42,6 +43,23 @@ class Entry:
 
 class Store:
     """SQLite 存储底座。"""
+
+    # 全量明细埋点字段白名单（v6）：每次 query 的场景/标签/实体/置信度分量/延迟/模型等
+    DETAIL_COLUMNS = (
+        "scene_id", "label", "tags", "query_tags", "entities", "refs",
+        "rewritten", "resolved_version_id", "refs_miss", "abstain",
+        "abstain_reason", "abstain_subreason", "strength", "margin",
+        "top1_score", "top1_entry_id", "top1_title", "hits_detail",
+        "web_results", "embed_model", "embedding_backend", "rewrite_used",
+        "latency_total_ms", "latency_recall_ms", "latency_rerank_ms",
+        "confidence_threshold"
+    )
+
+    # 全量对比支持的分组维度
+    ALLOWED_GROUP_BY = (
+        "scene_id", "label", "route", "abstain", "abstain_reason",
+        "embed_model", "embedding_backend", "session_id", "day"
+    )
 
     def __init__(self, db_path: Path | str | None = None) -> None:
         """
@@ -157,6 +175,37 @@ class Store:
         # 会话链路：query 埋点归属到具体会话（可选，未传则空），
         # 用于监控「每个会话走了 query/feedback/harvest/tooltrace 哪几步、缺哪步」。
         self._ensure_column(conn, "metrics", "session_id", "TEXT DEFAULT ''")
+        # v6 全量明细监控：场景/标记/标签/实体/置信度分量/延迟/模型等 26 个维度，
+        # 全部幂等补列，旧库可直接平滑升级。
+        self._ensure_column(conn, "metrics", "scene_id", "TEXT DEFAULT ''")
+        self._ensure_column(conn, "metrics", "label", "TEXT DEFAULT ''")
+        self._ensure_column(conn, "metrics", "tags", "TEXT DEFAULT '[]'")
+        self._ensure_column(conn, "metrics", "query_tags", "TEXT DEFAULT '[]'")
+        self._ensure_column(conn, "metrics", "entities", "TEXT DEFAULT '[]'")
+        self._ensure_column(conn, "metrics", "refs", "TEXT DEFAULT '[]'")
+        self._ensure_column(conn, "metrics", "rewritten", "TEXT DEFAULT ''")
+        self._ensure_column(conn, "metrics", "resolved_version_id", "TEXT DEFAULT ''")
+        self._ensure_column(conn, "metrics", "refs_miss", "INTEGER DEFAULT 0")
+        self._ensure_column(conn, "metrics", "abstain", "INTEGER DEFAULT 0")
+        self._ensure_column(conn, "metrics", "abstain_reason", "TEXT DEFAULT ''")
+        self._ensure_column(conn, "metrics", "abstain_subreason", "TEXT DEFAULT ''")
+        self._ensure_column(conn, "metrics", "strength", "REAL DEFAULT 0")
+        self._ensure_column(conn, "metrics", "margin", "REAL DEFAULT 0")
+        self._ensure_column(conn, "metrics", "top1_score", "REAL DEFAULT 0")
+        self._ensure_column(conn, "metrics", "top1_entry_id", "TEXT DEFAULT ''")
+        self._ensure_column(conn, "metrics", "top1_title", "TEXT DEFAULT ''")
+        self._ensure_column(conn, "metrics", "hits_detail", "TEXT DEFAULT '[]'")
+        self._ensure_column(conn, "metrics", "web_results", "INTEGER DEFAULT 0")
+        self._ensure_column(conn, "metrics", "embed_model", "TEXT DEFAULT ''")
+        self._ensure_column(conn, "metrics", "embedding_backend", "TEXT DEFAULT ''")
+        self._ensure_column(conn, "metrics", "rewrite_used", "INTEGER DEFAULT 0")
+        self._ensure_column(conn, "metrics", "latency_total_ms", "INTEGER DEFAULT 0")
+        self._ensure_column(conn, "metrics", "latency_recall_ms", "INTEGER DEFAULT 0")
+        self._ensure_column(conn, "metrics", "latency_rerank_ms", "INTEGER DEFAULT 0")
+        self._ensure_column(conn, "metrics", "confidence_threshold", "REAL DEFAULT 0")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_metrics_scene ON metrics(scene_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_metrics_label ON metrics(label)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_metrics_abstain ON metrics(abstain)")
         # 接口调用日志表：记录各接口真实调用次数（驱动「调用率」指标），
         # 同样带 is_test 标记，测试期调用可隔离出真实统计。
         cur.execute(
@@ -599,43 +648,46 @@ class Store:
         recall_candidates: int = 0,
         recall_tokens: int = 0,
         session_id: str = "",
+        detail: dict | None = None,
     ) -> None:
         """
-        持久化一条 token 埋点（每次 query 调用一次）。
+        持久化一条全量明细埋点（每次 query 调用一次）。
 
-        这是「知识库本体」的监控表：把 token 优化效果落库，服务化后由
-        /metrics 与监控大屏实时读取，实现「部署后埋点实时监控 token 优化内容」。
-        - is_test           ：测试隔离标记（1=开发期 demo 查询，聚合默认排除）。
-        - recall_candidates ：召回候选数（rerank 前命中的候选条数）。
-        - recall_tokens     ：召回候选 token（真实基线，替代旧版「全库塞」口径）。
-        - session_id        ：可选会话标识，用于监控「每个会话走了哪几步」。
-        baseline_tokens <= 0（如未开启 TOKEN_TRACE）时仍记录，但聚合端会跳过，
-        避免拉低整体节省比例（口径与 TokenLedger 一致）。
+        原 11 参数签名保持不变（向后兼容）；detail 字典承载 v6 的 26 个维度：
+        场景/标记/显式标签/解析标签/实体/引用/改写/版本/弃答归因/置信度分量/
+        top1 命中/延迟/模型等。JSON 类字段自动序列化为字符串。
         """
         cur = self._conn.cursor()
+        cols = ["ts", "query", "route", "hits", "actual_tokens", "baseline_tokens",
+                "confidence", "is_test", "recall_candidates", "recall_tokens", "session_id"]
+        vals = [ts if ts is not None else time.time(), query, route, hits,
+                actual_tokens, baseline_tokens, confidence, is_test,
+                recall_candidates, recall_tokens, session_id]
+        json_fields = {"tags", "query_tags", "entities", "refs", "hits_detail"}
+        if detail:
+            for col in self.DETAIL_COLUMNS:
+                val = detail.get(col)
+                if val is not None:
+                    cols.append(col)
+                    if col in json_fields and isinstance(val, (list, dict)):
+                        vals.append(json.dumps(val, ensure_ascii=False))
+                    else:
+                        vals.append(val)
+        placeholders = ", ".join(["?"] * len(cols))
         cur.execute(
-            """
-            INSERT INTO metrics (ts, query, route, hits, actual_tokens,
-                                 baseline_tokens, confidence, is_test,
-                                 recall_candidates, recall_tokens, session_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (ts if ts is not None else time.time(), query, route, hits,
-             actual_tokens, baseline_tokens, confidence, is_test,
-             recall_candidates, recall_tokens, session_id),
+            f"INSERT INTO metrics ({', '.join(cols)}) VALUES ({placeholders})",
+            vals,
         )
         self._conn.commit()
 
     def list_metrics(self, limit: int = 200, include_test: bool = False) -> list[dict]:
-        """按时间倒序返回最近 N 条埋点明细（供趋势图 / 明细表），默认排除测试数据。"""
+        """按时间倒序返回最近 N 条全字段埋点明细，默认排除测试数据。"""
         cur = self._conn.cursor()
-        cols = ("ts, query, route, hits, actual_tokens, baseline_tokens, confidence, "
-                "is_test, recall_candidates, recall_tokens")
         if include_test:
-            cur.execute(f"SELECT {cols} FROM metrics ORDER BY id DESC LIMIT ?", (limit,))
+            cur.execute("SELECT * FROM metrics ORDER BY id DESC LIMIT ?", (limit,))
         else:
             cur.execute(
-                f"SELECT {cols} FROM metrics WHERE is_test = 0 ORDER BY id DESC LIMIT ?",
+                "SELECT * FROM metrics WHERE is_test = 0 ORDER BY id DESC LIMIT ?",
                 (limit,),
             )
         return [dict(r) for r in cur.fetchall()]
@@ -695,6 +747,53 @@ class Store:
             "hits_total": int(row["hits_sum"] or 0),
             "avg_recall_candidates": round(avg_recall, 2),
             "recall_return_ratio": round(avg_hits / avg_recall, 4) if avg_recall else 0.0,
+        }
+
+    def metric_compare(self, group_by: str = "scene_id", include_test: bool = False, limit: int = 50) -> dict:
+        """
+        全量明细对比：按任意维度分组，输出每组的置信度/强度/间隔/命中/token/延迟/
+        拦截率/弃答率/召回收敛/节省率的均值，用于「所有维度明细对比」。
+        """
+        if group_by not in self.ALLOWED_GROUP_BY:
+            group_by = "scene_id"
+        expr = "strftime('%Y-%m-%d', ts, 'unixepoch')" if group_by == "day" else group_by
+        where = "baseline_tokens > 0 AND route IN ('knowledge', 'code', 'skill')"
+        if not include_test:
+            where += " AND is_test = 0"
+        sql = (
+            f"SELECT {expr} AS g, COUNT(*) AS n, "
+            "AVG(confidence) AS conf_avg, AVG(strength) AS strength_avg, "
+            "AVG(margin) AS margin_avg, AVG(hits) AS hits_avg, "
+            "AVG(recall_candidates) AS recall_avg, AVG(actual_tokens) AS act_avg, "
+            "AVG(baseline_tokens) AS base_avg, AVG(latency_total_ms) AS latency_avg, "
+            "SUM(CASE WHEN confidence >= ? AND hits > 0 THEN 1 ELSE 0 END) AS intercepted, "
+            "SUM(CASE WHEN confidence < ? THEN 1 ELSE 0 END) AS abstained "
+            f"FROM metrics WHERE {where} GROUP BY {expr} ORDER BY n DESC LIMIT ?"
+        )
+        cur = self._conn.cursor()
+        cur.execute(sql, (ABSTAIN_CONFIDENCE, ABSTAIN_CONFIDENCE, limit))
+        groups = []
+        for row in cur.fetchall():
+            g, n = row[0], row[1] or 0
+            conf_avg, strength_avg, margin_avg = (round(row[i] or 0, 4) for i in (2, 3, 4))
+            hits_avg, recall_avg = round(row[5] or 0, 4), round(row[6] or 0, 4)
+            act_avg, base_avg, latency_avg = (round(row[i] or 0, 4) for i in (7, 8, 9))
+            intercepted, abstained = row[10] or 0, row[11] or 0
+            groups.append({
+                "g": g, "n": n,
+                "conf_avg": conf_avg, "strength_avg": strength_avg, "margin_avg": margin_avg,
+                "hits_avg": hits_avg, "recall_avg": recall_avg,
+                "act_avg": act_avg, "base_avg": base_avg, "latency_avg": latency_avg,
+                "intercept_rate": round(intercepted / n, 4) if n else 0.0,
+                "abstain_rate": round(abstained / n, 4) if n else 0.0,
+                "recall_return_ratio": round(hits_avg / recall_avg, 4) if recall_avg else 0.0,
+                "saved_ratio": round((base_avg - act_avg) / base_avg, 4) if base_avg else 0.0,
+            })
+        return {
+            "group_by": group_by,
+            "groups": groups,
+            "available_group_by": list(self.ALLOWED_GROUP_BY),
+            "overall": self.metric_aggregate(include_test=include_test),
         }
 
     def record_api_call(self, api: str, is_test: int = 0, ts: float | None = None) -> None:

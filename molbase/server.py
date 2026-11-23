@@ -189,7 +189,22 @@ class KBRequestHandler(BaseHTTPRequestHandler):
                 q = qs.get("q", "")
                 sort = qs.get("sort", "ts")
                 order = qs.get("order", "desc")
-                return self._ok(self.orc.metric_detail(metric, limit, offset, q, sort, order))
+                # v6 全量明细：显式维度过滤参数
+                scene = qs.get("scene", "")
+                label = qs.get("label", "")
+                abstain = qs.get("abstain", "")
+                include_test = qs.get("include_test", "0") in ("1", "true", "yes", "on")
+                return self._ok(self.orc.metric_detail(
+                    metric, limit, offset, q, sort, order, scene, label, abstain, include_test
+                ))
+            except (ValueError, TypeError):
+                return self._err(400, "Invalid parameters")
+        if path == "/api/compare":
+            try:
+                group_by = qs.get("group_by", "scene_id")
+                include_test = qs.get("include_test", "0") in ("1", "true", "yes", "on")
+                limit = min(int(qs.get("limit", "50")), 200)
+                return self._ok(self.orc.metric_compare(group_by, include_test, limit))
             except (ValueError, TypeError):
                 return self._err(400, "Invalid parameters")
         if path == "/api/alerts":
@@ -324,9 +339,13 @@ class KBRequestHandler(BaseHTTPRequestHandler):
         refs = data.get("refs")
         if refs is not None and not isinstance(refs, list):
             refs = [str(refs)]
+        # v6 全量明细标记：只允许 golden / negative / real，其他值视为未标记
+        label = str(data.get("label", "")).strip()
+        if label not in ("golden", "negative", "real"):
+            label = ""
         resp = self.orc.query(
             query, top_k=top_k, tags=tags, session_id=session_id,
-            device_mac=device_mac, scene=scene, refs=refs,
+            device_mac=device_mac, scene=scene, refs=refs, label=label,
         )
         self._ok(_response_to_dict(resp))
 

@@ -971,9 +971,22 @@ function bindTable(btnId,tableId,searchId,limit){
 }
 window.addEventListener('hashchange',navigate);if(!location.hash)location.hash='#/home';navigate();setInterval(refresh,3000);refresh();
 /* === v4 监控增强：独立接口 / 图表 / 动画 / 告警 / 趋势 === */
+// v6 全量明细：token/flywheel/detail 统一展示 22 个真实维度
+var COLS_FULL = [
+  ['ts','时间'], ['query','提问'], ['label','标记'], ['scene_id','场景'],
+  ['route','路由'], ['abstain','弃答'], ['abstain_reason','弃答应'],
+  ['confidence','置信度'], ['strength','强度'], ['margin','间隔'],
+  ['top1_score','首分'], ['top1_title','首条命中'], ['hits','命中'],
+  ['recall_candidates','召回数'], ['recall_return_ratio','收敛比'],
+  ['actual_tokens','实际Token'], ['baseline_tokens','基线Token'],
+  ['saved_ratio','节省率'], ['latency_total_ms','总延迟ms'],
+  ['latency_recall_ms','召回ms'], ['latency_rerank_ms','重排ms'],
+  ['embed_model','向量模型']
+];
 var COLS = {
-  token: [['ts','时间'],['query','查询'],['route','路由'],['hits','命中'],['actual_tokens','实际Token'],['baseline_tokens','基线Token'],['confidence','置信度']],
-  flywheel: [['ts','时间'],['query','查询'],['route','路由'],['hits','命中'],['actual_tokens','实际Token'],['baseline_tokens','基线Token'],['confidence','置信度']],
+  token: COLS_FULL,
+  flywheel: COLS_FULL,
+  detail: COLS_FULL,
   abstain: [['ts','时间'],['query','查询'],['reason','归因'],['subreason','子因'],['recall_candidates','召回数'],['top1_score','首分'],['confidence','置信度']],
   ingest: [['ts','时间'],['entry_id','条目ID'],['state','状态'],['title','标题']],
   writeback: [['ts','时间'],['type_cn','类型'],['obj','对象'],['state','状态'],['detail','摘要']],
@@ -982,6 +995,61 @@ var COLS = {
   catalog: [['entry_id','条目ID'],['entry_type','类型'],['title','标题'],['source','来源'],['heat','热度'],['created_at','创建时间']],
   api: [['ts','时间'],['api','接口'],['is_test','是否测试']]
 };
+
+// v6 全量对比面板：按任意维度分组，展示全量维度均值对比
+function renderComparePanel(metric) {
+  var panel = document.createElement('div');
+  panel.id = 'compare-panel-' + metric;
+  panel.style.cssText = 'margin:12px 0;padding:12px;border:1px solid #e5e7eb;border-radius:6px;background:#fff;';
+  panel.innerHTML = '<div style="font-weight:600;margin-bottom:8px;">全量维度对比（按分组维度聚合）</div>' +
+    '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px;">' +
+    '<select id="group-by-' + metric + '" style="padding:4px;border:1px solid #ccc;border-radius:4px;"></select>' +
+    '<button id="compare-refresh-' + metric + '" style="padding:4px 8px;cursor:pointer;">刷新对比</button></div>' +
+    '<div id="compare-table-' + metric + '"></div>';
+  var host = document.getElementById('body-' + metric);
+  if (!host) return;
+  host.appendChild(panel);
+  var sel = document.getElementById('group-by-' + metric);
+  var labels = {scene_id:'场景',label:'标记',route:'路由',abstain:'弃答',abstain_reason:'弃答应',embed_model:'向量模型',embedding_backend:'向量后端',session_id:'会话',day:'日期'};
+  ajaxGet('/api/compare?group_by=scene_id&limit=50', function(cfg) {
+    var keys = (cfg && cfg.available_group_by) ? cfg.available_group_by : ['scene_id'];
+    var html = '';
+    for (var i = 0; i < keys.length; i++) {
+      var k = keys[i];
+      var chosen = k === (window.__pageState[metric] && window.__pageState[metric].group_by) ? ' selected' : '';
+      html += '<option value="' + k + '"' + chosen + '>' + (labels[k] || k) + '</option>';
+    }
+    sel.innerHTML = html;
+    sel.onchange = function() {
+      window.__pageState[metric].group_by = sel.value;
+      renderCompareData(metric);
+    };
+    document.getElementById('compare-refresh-' + metric).onclick = function() { renderCompareData(metric); };
+    renderCompareData(metric);
+  });
+}
+function renderCompareData(metric) {
+  var sel = document.getElementById('group-by-' + metric);
+  var host = document.getElementById('compare-table-' + metric);
+  if (!sel || !host) return;
+  var st = window.__pageState[metric] || {};
+  ajaxGet('/api/compare?group_by=' + encodeURIComponent(sel.value) + '&include_test=' + (st.include_test ? '1' : '0') + '&limit=50', function(d) {
+    if (!d || !d.groups) { host.innerHTML = '<div class="empty">暂无对比数据</div>'; return; }
+    var head = ['分组','样本','置信度','强度','间隔','命中','召回','收敛比','节省率','延迟ms','拦截率','弃答率'];
+    var html = '<table style="width:100%;border-collapse:collapse;font-size:12px;"><thead><tr>';
+    for (var h = 0; h < head.length; h++) html += '<th style="border:1px solid #ddd;padding:4px;background:#f9fafb;">' + head[h] + '</th>';
+    html += '</tr></thead><tbody>';
+    for (var i = 0; i < d.groups.length; i++) {
+      var g = d.groups[i];
+      var vals = [g.g, g.n, fmt(g.conf_avg), fmt(g.strength_avg), fmt(g.margin_avg), fmt(g.hits_avg), fmt(g.recall_avg), fmt(g.recall_return_ratio), pct(g.saved_ratio), fmt(g.latency_avg), pct(g.intercept_rate), pct(g.abstain_rate)];
+      html += '<tr>';
+      for (var j = 0; j < vals.length; j++) html += '<td style="border:1px solid #ddd;padding:4px;">' + (vals[j] == null ? '-' : vals[j]) + '</td>';
+      html += '</tr>';
+    }
+    html += '</tbody></table>';
+    host.innerHTML = html;
+  });
+}
 
 var COLS_BAR = {
   abstain: { key: 'by_reason', label: '归因分布' },
@@ -1276,11 +1344,13 @@ function renderDetailPage(metric) {
 
   if (!window.__pageState) window.__pageState = {};
   if (!window.__pageState[metric]) {
-    window.__pageState[metric] = { limit: 50, offset: 0, q: '', sort: 'ts', order: 'desc' };
+    window.__pageState[metric] = { limit: 50, offset: 0, q: '', sort: 'ts', order: 'desc', scene: '', label: '', abstain: '', include_test: false, group_by: 'scene_id' };
   }
   var st = window.__pageState[metric];
 
-  var url = '/api/detail?metric=' + metric + '&limit=' + st.limit + '&offset=' + st.offset + '&q=' + encodeURIComponent(st.q) + '&sort=' + st.sort + '&order=' + st.order;
+  var url = '/api/detail?metric=' + metric + '&limit=' + st.limit + '&offset=' + st.offset + '&q=' + encodeURIComponent(st.q) + '&sort=' + st.sort + '&order=' + st.order +
+    '&scene=' + encodeURIComponent(st.scene || '') + '&label=' + encodeURIComponent(st.label || '') +
+    '&abstain=' + encodeURIComponent(st.abstain || '') + '&include_test=' + (st.include_test ? '1' : '0');
 
   ajaxGet(url, function(d) {
     if (!d) {
@@ -1293,6 +1363,14 @@ function renderDetailPage(metric) {
     // 工具条
     html += '<div class="toolbar" style="display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap;">';
     html += '<input class="search" id="q-' + metric + '" type="text" value="' + st.q + '" placeholder="搜索..." style="padding:4px;border:1px solid #ccc;border-radius:4px;">';
+    // v6 全量明细过滤控件
+    html += '<input id="scene-' + metric + '" type="text" value="' + (st.scene || '') + '" placeholder="场景" style="padding:4px;border:1px solid #ccc;border-radius:4px;width:110px;">';
+    html += '<input id="label-' + metric + '" type="text" value="' + (st.label || '') + '" placeholder="标记" style="padding:4px;border:1px solid #ccc;border-radius:4px;width:90px;">';
+    html += '<select id="abstain-' + metric + '" style="padding:4px;border:1px solid #ccc;border-radius:4px;">';
+    html += '<option value=""' + (st.abstain === '' ? ' selected' : '') + '>全部</option>';
+    html += '<option value="0"' + (st.abstain === '0' ? ' selected' : '') + '>放行</option>';
+    html += '<option value="1"' + (st.abstain === '1' ? ' selected' : '') + '>弃答</option></select>';
+    html += '<label style="font-size:12px;"><input id="test-' + metric + '" type="checkbox"' + (st.include_test ? ' checked' : '') + '> 含测试</label>';
     
     // 排序下拉
     html += '<select id="sort-' + metric + '" style="padding:4px;border:1px solid #ccc;border-radius:4px;">';
@@ -1341,6 +1419,9 @@ function renderDetailPage(metric) {
       html += '</div>';
     }
 
+    // v6 全量维度对比面板（在表格上方）
+    html += '<div id="compare-slot-' + metric + '"></div>';
+
     // Table
     html += '<table id="tbl-' + metric + '" style="width:100%;border-collapse:collapse;font-size:12px;">';
     html += '<thead><tr>';
@@ -1359,7 +1440,13 @@ function renderDetailPage(metric) {
         var display = val;
         var cls = '';
         
-        if (typeof val === 'boolean') {
+        if (field === 'abstain') {
+          display = Number(val) === 1 ? '弃答' : '放行';
+          cls = 'pill ' + (Number(val) === 1 ? 'miss' : 'ok');
+        } else if (field === 'label' && val) {
+          display = val;
+          cls = 'pill ' + (val === 'golden' ? 'ok' : 'miss');
+        } else if (typeof val === 'boolean') {
           display = val ? '是' : '否';
           cls = 'pill ' + (val ? 'ok' : 'miss');
         } else if (field === 'ts' || field === 'created_at') {
@@ -1397,6 +1484,7 @@ function renderDetailPage(metric) {
     }
 
     container.innerHTML = html;
+    renderComparePanel(metric);
 
     // 绑定事件
     var qInput = document.getElementById('q-' + metric);
@@ -1411,6 +1499,25 @@ function renderDetailPage(metric) {
         }, 300);
       };
     }
+
+    // v6 全量过滤控件绑定
+    ['scene', 'label'].forEach(function(name) {
+      var input = document.getElementById(name + '-' + metric);
+      if (!input) return;
+      var timer = null;
+      input.oninput = function() {
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(function() {
+          st[name] = input.value;
+          st.offset = 0;
+          renderDetailPage(metric);
+        }, 300);
+      };
+    });
+    var abstainSel = document.getElementById('abstain-' + metric);
+    if (abstainSel) abstainSel.onchange = function() { st.abstain = abstainSel.value; st.offset = 0; renderDetailPage(metric); };
+    var testBox = document.getElementById('test-' + metric);
+    if (testBox) testBox.onchange = function() { st.include_test = testBox.checked; st.offset = 0; renderDetailPage(metric); };
 
     var sortSel = document.getElementById('sort-' + metric);
     if (sortSel) {

@@ -98,12 +98,30 @@ class Reranker:
         sims: list[float]
         if embedder is not None and query:
             try:
-                q_vec = embedder.embed(query)
-                from ..config import SEMANTIC_SIM_CONTENT_CHARS
-                sims = [
-                    cosine_similarity(q_vec, embedder.embed(h.entry.title + " " + (h.entry.content or "")[:SEMANTIC_SIM_CONTENT_CHARS]))
-                    for h in hits
+                from ..config import SEMANTIC_SIM_CONTENT_CHARS, SEMANTIC_RERANK_LIMIT
+                # 只精排召回池前 N 条（性能），其余保持 BM25 顺序不参与语义分
+                rerank_hits = hits[:SEMANTIC_RERANK_LIMIT]
+                texts = [query] + [
+                    h.entry.title + " " + (h.entry.content or "")[:SEMANTIC_SIM_CONTENT_CHARS]
+                    for h in rerank_hits
                 ]
+                # 性能：支持批量的后端一次 HTTP 拿全部向量；旧后端逐条兼容
+                batch_fn = getattr(embedder, "embed_batch", None)
+                if batch_fn is not None:
+                    vecs = batch_fn(texts)
+                    q_vec = vecs[0]
+                    sims = [cosine_similarity(q_vec, v) for v in vecs[1:]]
+                else:
+                    q_vec = embedder.embed(query)
+                    sims = [
+                        cosine_similarity(q_vec, embedder.embed(h.entry.title + " " + (h.entry.content or "")[:SEMANTIC_SIM_CONTENT_CHARS]))
+                        for h in rerank_hits
+                    ]
+                # 未进入精排窗口的候选语义分记 0（未评估），保证 sims 与 hits 等长。
+                # 绝不能拿 BM25 分冒充语义分——BM25 首条常接近 1.0，会把负例 strength
+                # 抬到 1.0 造成全量误放行。它们仍参与综合分里的热度/BM25 排序。
+                if len(sims) < len(hits):
+                    sims = list(sims) + [0.0] * (len(hits) - len(sims))
             except Exception:
                 sims = [h.score for h in hits]  # 模型失效 -> 回退 BM25
         else:
