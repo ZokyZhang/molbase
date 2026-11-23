@@ -15,6 +15,9 @@ Type=simple
 User=zoky
 WorkingDirectory=/home/zoky/molbase
 # 硬编码监听 0.0.0.0:8787，不鉴权（受信内网）
+# v6 性能：VM 为低配 CPU，bge-m3 长文本推理 4 条需 11.5 秒；此处强制 hash
+# 向量后端（零模型、毫秒级）。开发机不受影响，仍用 config.py 默认的 bge-m3。
+Environment=MOLBASE_EMBEDDING_BACKEND=hash
 ExecStart=/usr/bin/python3 -m molbase.server --host 0.0.0.0 --port 8787
 # 进程异常退出自动拉起
 Restart=always

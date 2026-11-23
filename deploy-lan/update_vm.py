@@ -34,6 +34,7 @@ FILES = [
     "molbase/orchestrator.py",
     "molbase/server.py",
     "molbase/config.py",
+    "molbase/embedding.py",
     "molbase/llm.py",
     "molbase/summarize.py",
     "molbase/retrieval/__init__.py",
