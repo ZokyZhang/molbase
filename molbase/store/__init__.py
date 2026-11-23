@@ -1098,6 +1098,23 @@ class Store:
         )
         self._conn.commit()
 
+    def count_positive_feedback_since_evolve(self) -> int:
+        """
+        统计「上次进化之后」的正面反馈数（hit/adopt/cite）。
+
+        用途：v8.0 飞轮修复——进化触发计数原为 Orchestrator 实例内存，
+        进程重启即清零，导致「5 次正反馈触发进化」在重启后永远攒不满。
+        此方法让计数可从持久化日志恢复，飞轮不再因重启而停摆。
+        """
+        cur = self._conn.cursor()
+        cur.execute("SELECT COALESCE(MAX(ts), 0) FROM evolve_log")
+        last_ts = float(cur.fetchone()[0] or 0)
+        cur.execute(
+            "SELECT COUNT(*) FROM feedback_log WHERE ts > ? AND action IN ('hit','adopt','cite')",
+            (last_ts,),
+        )
+        return int(cur.fetchone()[0] or 0)
+
     def record_abstain(
         self,
         query: str,
@@ -1243,18 +1260,34 @@ class Store:
         }
 
     def evolve_aggregate(self) -> dict:
-        """聚合进化历史，返回 {steps, added_edges, decayed, archived}。"""
+        """
+        聚合进化历史，返回 {steps, added_edges, decayed, archived, cleaned, net_delta, idle_steps}。
+
+        v8.0：added_edges 是「连边动作数」而非质量提升，单看它会虚高（旧版 2279 边、
+        decayed/archived 恒 0，飞轮看似在转实则只增不减）。新增：
+        - cleaned    = decayed + archived：真实生命周期动作（衰减+归档）；
+        - net_delta  = added_edges - cleaned：净变化，正数净增、负数说明在收敛淘汰；
+        - idle_steps：decayed+archived==0 的步数（空转步），直接暴露「伪进化」。
+        """
         cur = self._conn.cursor()
         cur.execute(
             "SELECT COUNT(*) AS n, COALESCE(SUM(added_edges),0) AS e, "
-            "COALESCE(SUM(decayed),0) AS d, COALESCE(SUM(archived),0) AS a FROM evolve_log"
+            "COALESCE(SUM(decayed),0) AS d, COALESCE(SUM(archived),0) AS a, "
+            "COALESCE(SUM(CASE WHEN decayed + archived = 0 THEN 1 ELSE 0 END),0) AS idle "
+            "FROM evolve_log"
         )
         row = cur.fetchone()
+        e = int(row["e"] or 0)
+        d = int(row["d"] or 0)
+        a = int(row["a"] or 0)
         return {
             "steps": int(row["n"] or 0),
-            "added_edges": int(row["e"] or 0),
-            "decayed": int(row["d"] or 0),
-            "archived": int(row["a"] or 0),
+            "added_edges": e,
+            "decayed": d,
+            "archived": a,
+            "cleaned": d + a,
+            "net_delta": e - (d + a),
+            "idle_steps": int(row["idle"] or 0),
         }
 
     def writeback_recent(self, limit: int = 10) -> list[dict]:

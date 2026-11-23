@@ -40,6 +40,7 @@ from .config import (
     EMBEDDING_MODEL_NAME,
     EVOLVE_INTERVAL,
     EXPAND_CACHE_SIZE,
+    FEEDBACK_MIN_CONFIDENCE,
     FEEDBACK_WEIGHT_ADOPT,
     FEEDBACK_WEIGHT_CITE,
     FEEDBACK_WEIGHT_HIT,
@@ -250,6 +251,13 @@ class Orchestrator:
         self._query_count = 0
         self._resolver: dict[str, Entry] = {}
         self._baseline_tokens = 0
+        # v8.0 飞轮：同会话命中记录（驱动 implicit hit 隐式正反馈，让「再次命中」也产出信号）
+        self._session_hits: dict[str, set] = {}
+        # v8.0 飞轮：进化触发计数从持久化日志恢复（避免重启清零导致飞轮停摆）
+        try:
+            self._feedback_since_evolve = self.store.count_positive_feedback_since_evolve()
+        except Exception:
+            self._feedback_since_evolve = 0
         self._rebuild()
 
     def _init_embedder(
@@ -1094,7 +1102,24 @@ class Orchestrator:
         # v7 自进化闭环：高置信命中自动正反馈（热度越用越准）+ 工具调用轨迹归因。
         # 两者都不得影响主链路返回，异常一律吞掉。
         if not abstain and ranked:
-            self._auto_feedback(ranked[0].entry.entry_id, session_id, confidence)
+            top1_id = ranked[0].entry.entry_id
+            self._auto_feedback(top1_id, session_id, confidence)
+            # v8.0 飞轮：同会话隐式正反馈——同一 session 再次命中同一条目，
+            # 说明该条目被反复用到，额外记一次 hit（多源信号，不依赖用户打分）。
+            try:
+                seen = self._session_hits.setdefault(session_id or "_default", set())
+                if top1_id in seen:
+                    self.store.add_heat(top1_id, FEEDBACK_WEIGHT_HIT)
+                    self.store.record_feedback(session_id, top1_id, "hit", source="auto_implicit")
+                seen.add(top1_id)
+                # 防长跑服务内存泄漏：会话记录超过上限时丢弃最早的一个（dict 保插入序）
+                if len(self._session_hits) > 500:
+                    try:
+                        self._session_hits.pop(next(iter(self._session_hits)))
+                    except Exception:
+                        pass
+            except Exception:
+                pass
         try:
             self.record_tooltrace(
                 session_id,
@@ -1105,6 +1130,16 @@ class Orchestrator:
             pass
         # v7.2 工具轨迹隐式复用：查询自动携带相关 skill 摘要（不影响主结果）
         resp.skills = self._match_auto_skills(text)
+        # v8.0 飞轮：技能被检索复用即记一次 cite（技能复用的正反馈，闭环到技能热度）
+        if resp.skills:
+            try:
+                for sk in resp.skills:
+                    sid = sk.get("entry_id")
+                    if sid:
+                        self.store.add_heat(sid, FEEDBACK_WEIGHT_CITE)
+                        self.store.record_feedback(session_id, sid, "cite", source="auto_skill")
+            except Exception:
+                pass
         return resp
 
     def _semantic_sim(self, query: str, entry: Entry) -> float:
@@ -1265,6 +1300,9 @@ class Orchestrator:
         stats = self.evolution.learn()
         # 质量底线（进化侧）：死知识自动归档
         stats["archived"] = self.store.archive_dead(ARCHIVE_DAYS, ARCHIVE_HEAT_MAX)
+        # v8.0 飞轮：空转标记——本步既没衰减也没归档，说明进化没产生真实生命周期动作，
+        # 只有「连边」在空转（旧版 added_edges 2279 而 decayed/archived 恒 0 的病根）。
+        stats["idle"] = 1 if (int(stats.get("cold_decayed", 0)) + int(stats.get("archived", 0))) == 0 else 0
         # 进化日志：记录本次步进结果（建边/冷衰减/归档），驱动飞轮「进化」环节统计
         self.store.record_evolve(
             added_edges=int(stats.get("edges", 0)),
@@ -1430,6 +1468,14 @@ class Orchestrator:
             ok_confirm = self.store.confirm_draft(draft_id, entry_id)
             resp = self.query(q, top_k=5, label="gap_verify")
             verified = (not resp.abstain) and resp.confidence >= ABSTAIN_CONFIDENCE
+            # v8.0 飞轮：补数草稿确认并复检命中 = 一次真实的任务成功信号，回写正反馈
+            # （直接加热度、不触发 rebuild，避免与上面 query 的重建重入）。
+            if verified:
+                try:
+                    self.store.add_heat(entry_id, FEEDBACK_WEIGHT_ADOPT)
+                    self.store.record_feedback("", entry_id, "adopt", source="auto_gap")
+                except Exception:
+                    pass
             return {"ok": True, "draft_id": draft_id, "entry_id": entry_id, "state": state, "confirmed": ok_confirm, "verified": verified, "confidence": round(resp.confidence, 4)}
         except Exception as e:
             return {"ok": False, "error": str(e)}
@@ -1465,7 +1511,9 @@ class Orchestrator:
         高置信命中后的隐式正反馈：越常被命中的条目热度越高，实现「越用越准」。
         不触发 rebuild（避免每次 query 都重建索引），热度在下次进化/反馈/入库时生效。
         """
-        if not entry_id or confidence < 0.6:
+        # v8.0 飞轮：触发线从硬编码 0.6 改为 FEEDBACK_MIN_CONFIDENCE（恒低于弃答线），
+        # 保证「答了就会反馈」，杜绝 0.55~0.6 的答而不馈空档（飞轮自锁根因之一）。
+        if not entry_id or confidence < FEEDBACK_MIN_CONFIDENCE:
             return
         try:
             self.store.add_heat(entry_id, FEEDBACK_WEIGHT_HIT)

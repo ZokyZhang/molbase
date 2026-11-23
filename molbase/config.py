@@ -392,6 +392,45 @@ ARCHIVE_DAYS = 30.0
 _apply_overrides(_load_external_overrides())
 
 
+# ============================================================
+# v8.0 飞轮修复配置（放在 _apply_overrides 之后，按最终 EMBEDDING_BACKEND 标定阈值）
+#
+# 根因：不同 embedding 后端相似度值域差异极大（hash 余弦普遍 0.2~0.6，
+# bge-m3 0.4~0.85），用同一套阈值服务两个引擎必然「一套过松、一套过严」，
+# 导致弃答率随后端漂移（实测 hash 期弃答 48.4% vs ollama 期 27.2%）。
+# ============================================================
+_ENGINE_THRESHOLDS = {
+    "hash": {"abstain": 0.35, "no_match": 0.18, "weak": 0.30},
+    "ollama": {"abstain": 0.55, "no_match": 0.30, "weak": 0.50},
+    "sentence-transformers": {"abstain": 0.45, "no_match": 0.25, "weak": 0.40},
+}
+_engine_name = str(EMBEDDING_BACKEND).strip().lower()
+_engine_thr = _ENGINE_THRESHOLDS.get(_engine_name, _ENGINE_THRESHOLDS["ollama"])
+# 环境变量显式指定阈值时尊重用户值，否则按后端自动标定
+if "MOLBASE_ABSTAIN_CONFIDENCE" not in _os.environ:
+    ABSTAIN_CONFIDENCE = _engine_thr["abstain"]
+if "MOLBASE_NO_MATCH_STRENGTH" not in _os.environ:
+    NO_MATCH_STRENGTH = _engine_thr["no_match"]
+if "MOLBASE_WEAK_STRENGTH_THRESHOLD" not in _os.environ:
+    WEAK_STRENGTH_THRESHOLD = _engine_thr["weak"]
+
+# 反馈触发线：永远低于弃答线，保证「答了就会反馈」，
+# 杜绝旧版 0.6 > 0.55 造成的 0.55~0.6「答而不馈」空档（飞轮自锁根因之一）。
+FEEDBACK_MIN_CONFIDENCE = round(ABSTAIN_CONFIDENCE * 0.85, 4)
+
+# 热度权重提升：旧值 0.05 让反馈几乎不影响排序（飞轮转了也不传动）。
+# 提到 0.15，语义仍主导（0.75），但正反馈能被排序感知，飞轮传动轴接上。
+RERANK_WEIGHT_HEAT = 0.15
+RERANK_WEIGHT_SIM = 0.75
+
+# 数据生命周期适配系统真实寿命：旧值 14/30 天 > 系统龄（6 天），衰减归档永不触发，
+# 导致「只增不减的伪进化」。冷知识 3 天未访问即衰减、7 天归档；
+# 归档热度上限 2.0 允许「低热且久未用」下沉，但不误杀刚被正反馈抬高的条目。
+COLD_DECAY_DAYS = 3.0
+ARCHIVE_DAYS = 7.0
+ARCHIVE_HEAT_MAX = 2.0
+
+
 # ---------------------------------------------------------------------------
 # 代码代工参数（硬编码）
 # ---------------------------------------------------------------------------
