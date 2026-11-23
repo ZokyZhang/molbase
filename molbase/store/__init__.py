@@ -247,6 +247,8 @@ class Store:
             )
             """
         )
+        # v7 自进化闭环：区分人工反馈与命中后自动正反馈（auto_hit）
+        self._ensure_column(conn, "feedback_log", "source", "TEXT DEFAULT 'manual'")
         # 入库日志表：记录每次摄入的冲突四态（new/merge/duplicate/conflict/pinned），
         # 驱动监控「有没有入、入成什么样」，而非只看接口被调了几次。
         cur.execute(
@@ -921,12 +923,24 @@ class Store:
         )
 
     # ------------------------------------------------------------------ 环节日志（飞轮监控）
-    def record_feedback(self, session_id: str, entry_id: str, action: str, ts: float | None = None) -> None:
-        """记录一次反馈动作（hit/adopt/cite/reject），驱动飞轮「反馈」环节统计。"""
+    def record_feedback(
+        self,
+        session_id: str,
+        entry_id: str,
+        action: str,
+        ts: float | None = None,
+        source: str = "manual",
+    ) -> None:
+        """
+        记录一次反馈动作（hit/adopt/cite/reject），驱动飞轮「反馈」环节统计。
+        source="auto" 表示高置信命中后的隐式正反馈，source="manual" 为调用方显式反馈。
+        """
+        if ts is None:
+            ts = time.time()
         cur = self._conn.cursor()
         cur.execute(
-            "INSERT INTO feedback_log (ts, session_id, entry_id, action) VALUES (?, ?, ?, ?)",
-            (ts if ts is not None else time.time(), session_id, entry_id, action),
+            "INSERT INTO feedback_log (ts, session_id, entry_id, action, source) VALUES (?, ?, ?, ?, ?)",
+            (ts, session_id, entry_id, action, source),
         )
         self._conn.commit()
 
@@ -1020,11 +1034,15 @@ class Store:
         return [dict(r) for r in cur.fetchall()]
 
     def feedback_aggregate(self) -> dict:
-        """聚合反馈动作分布，返回 {by_action: {action: count}, total}。"""
+        """聚合反馈动作与来源分布，返回 {total, by_action, by_source}。"""
         cur = self._conn.cursor()
-        cur.execute("SELECT action, COUNT(*) AS cnt FROM feedback_log GROUP BY action ORDER BY cnt DESC")
-        by_action = {r["action"]: r["cnt"] for r in cur.fetchall()}
-        return {"total": sum(by_action.values()), "by_action": by_action}
+        cur.execute("SELECT COUNT(*) FROM feedback_log")
+        total = cur.fetchone()[0]
+        cur.execute("SELECT action, COUNT(*) FROM feedback_log GROUP BY action")
+        by_action = dict(cur.fetchall())
+        cur.execute("SELECT source, COUNT(*) FROM feedback_log GROUP BY source")
+        by_source = dict(cur.fetchall())
+        return {"total": total, "by_action": by_action, "by_source": by_source}
 
     def ingest_aggregate(self) -> dict:
         """聚合入库结果分布，返回 {by_state: {state: count}, total}。"""
@@ -1032,6 +1050,61 @@ class Store:
         cur.execute("SELECT state, COUNT(*) AS cnt FROM ingest_log GROUP BY state ORDER BY cnt DESC")
         by_state = {r["state"]: r["cnt"] for r in cur.fetchall()}
         return {"total": sum(by_state.values()), "by_state": by_state}
+
+    def feedback_recent(self, limit: int = 100) -> list[dict]:
+        """最近 N 条反馈明细（飞轮「反馈」下钻数据源）。"""
+        cur = self._conn.cursor()
+        cur.execute(
+            "SELECT id, ts, session_id, entry_id, action, source FROM feedback_log ORDER BY id DESC LIMIT ?",
+            (limit,),
+        )
+        cols = ["id", "ts", "session_id", "entry_id", "action", "source"]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+    def evolve_recent(self, limit: int = 100) -> list[dict]:
+        """最近 N 次进化步进明细（飞轮「进化」下钻数据源）。"""
+        cur = self._conn.cursor()
+        cur.execute(
+            "SELECT id, ts, added_edges, decayed, archived FROM evolve_log ORDER BY id DESC LIMIT ?",
+            (limit,),
+        )
+        cols = ["id", "ts", "added_edges", "decayed", "archived"]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+    def evolution_health(self) -> dict:
+        """
+        自进化健康度：反馈率 / 自动反馈占比 / 进化步进 / 弃答缺口 /
+        工具轨迹数 / 会话完整率。全部为基础类型，供大屏与对比接口消费。
+        """
+        ma = self.metric_aggregate()
+        queries = ma["queries"]
+        fa = self.feedback_aggregate()
+        ea = self.evolve_aggregate()
+        aa = self.abstain_aggregate(200)
+        ss = self.session_summary()
+        tt = self.list_tooltraces(1000)
+
+        feedback_total = fa["total"]
+        by_action = fa["by_action"]
+        by_source = fa["by_source"]
+        feedback_rate = round(feedback_total / queries, 4) if queries else 0.0
+        auto_feedback = int(by_source.get("auto", 0))
+        auto_feedback_ratio = round(auto_feedback / feedback_total, 4) if feedback_total else 0.0
+        complete_sessions = sum(1 for item in ss if not item.get("missing"))
+        return {
+            "queries": queries,
+            "feedback_total": feedback_total,
+            "by_action": by_action,
+            "by_source": by_source,
+            "feedback_rate": feedback_rate,
+            "auto_feedback": auto_feedback,
+            "auto_feedback_ratio": auto_feedback_ratio,
+            "evolve": ea,
+            "gap_total": aa["total"],
+            "gap_no_data": aa["by_reason"].get("no_data", 0),
+            "tooltrace_count": len(tt),
+            "session_complete_rate": round(complete_sessions / len(ss), 4) if ss else 0.0,
+        }
 
     def evolve_aggregate(self) -> dict:
         """聚合进化历史，返回 {steps, added_edges, decayed, archived}。"""

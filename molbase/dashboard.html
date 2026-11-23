@@ -546,6 +546,8 @@ html, body { height: 100%; }
       <button class="navtab" data-route="home">首页概览</button>
       <button class="navtab" data-route="token">Token 效能</button>
       <button class="navtab" data-route="flywheel">飞轮运转</button>
+      <button class="navtab" data-route="feedback">反馈明细</button>
+      <button class="navtab" data-route="evolve">进化明细</button>
       <button class="navtab" data-route="abstain">弃答归因</button>
       <button class="navtab" data-route="ingest">入库分布</button>
       <button class="navtab" data-route="writeback">回写明细</button>
@@ -601,6 +603,18 @@ html, body { height: 100%; }
         <div class="page-title">飞轮运转</div>
         <div class="page-desc">各环节流转效率与瓶颈分析</div>
         <div id="body-flywheel"></div>
+      </div>
+      <div class="page" id="page-feedback" style="display:none">
+        <div class="crumbs"><a data-route="home">首页</a> / <span class="cur">反馈明细</span></div>
+        <div class="page-title">反馈明细</div>
+        <div class="page-desc">人工反馈与高置信命中自动正反馈（auto_hit）明细</div>
+        <div id="body-feedback"></div>
+      </div>
+      <div class="page" id="page-evolve" style="display:none">
+        <div class="crumbs"><a data-route="home">首页</a> / <span class="cur">进化明细</span></div>
+        <div class="page-title">进化明细</div>
+        <div class="page-desc">自我进化步进：建边 / 冷衰减 / 归档</div>
+        <div id="body-evolve"></div>
       </div>
       <div class="page" id="page-abstain" style="display:none">
         <div class="crumbs"><a data-route="home">首页</a> / <span class="cur">弃答归因</span></div>
@@ -686,7 +700,7 @@ html, body { height: 100%; }
     document.getElementById("status-text").textContent = on ? "服务在线 · 实时监控中" : "服务离线";
   }
 
-var state={overview:null,metrics:null};var ROUTES=['home','token','flywheel','abstain','ingest','writeback','participation','sessions','catalog','api','detail'];function go(route){location.hash='#/'+route;}function currentRoute(){var h=location.hash.replace('#/','');return ROUTES.indexOf(h)>-1?h:'home';}function navigate(){var cur=currentRoute();document.querySelectorAll('.navtab').forEach(function(t){if(t.getAttribute('data-route')===cur)t.classList.add('active');else t.classList.remove('active');});document.querySelectorAll('.page').forEach(function(p){p.style.display=(p.id==='page-'+cur)?'':'none';});renderCurrent();}function renderStub(route){var c=document.getElementById('body-'+route);if(c)c.innerHTML='<div class="empty">该模块渲染中…</div>';}function refresh(){Promise.all([fetch('/overview').then(function(r){return r.json();}),fetch('/metrics').then(function(r){return r.json();})]).then(function(res){state.overview=res[0];state.metrics=res[1];setStatus(true);renderCurrent();}).catch(function(){setStatus(false);});}function renderCurrent(){if(!state.overview)return;var r=currentRoute();if(r==='home')renderHome();else if(r==='token')renderToken();else if(r==='flywheel')renderFlywheel();else if(r==='abstain'&&typeof renderAbstain==='function')renderAbstain();else if(r==='ingest'&&typeof renderIngest==='function')renderIngest();else if(r==='writeback'&&typeof renderWriteback==='function')renderWriteback();else if(r==='participation'&&typeof renderParticipation==='function')renderParticipation();else if(r==='sessions'&&typeof renderSessions==='function')renderSessions();else if(r==='catalog'&&typeof renderCatalog==='function')renderCatalog();else if(r==='api'&&typeof renderApi==='function')renderApi();else if(r==='detail'&&typeof renderDetail==='function')renderDetail();else renderStub(r);}
+var state={overview:null,metrics:null};var ROUTES=['home','token','flywheel','feedback','evolve','abstain','ingest','writeback','participation','sessions','catalog','api','detail'];function go(route){location.hash='#/'+route;}function currentRoute(){var h=location.hash.replace('#/','');return ROUTES.indexOf(h)>-1?h:'home';}function navigate(){var cur=currentRoute();document.querySelectorAll('.navtab').forEach(function(t){if(t.getAttribute('data-route')===cur)t.classList.add('active');else t.classList.remove('active');});document.querySelectorAll('.page').forEach(function(p){p.style.display=(p.id==='page-'+cur)?'':'none';});renderCurrent();}function renderStub(route){var c=document.getElementById('body-'+route);if(c)c.innerHTML='<div class="empty">该模块渲染中…</div>';}function refresh(){Promise.all([fetch('/overview').then(function(r){return r.json();}),fetch('/metrics').then(function(r){return r.json();})]).then(function(res){state.overview=res[0];state.metrics=res[1];setStatus(true);renderCurrent();}).catch(function(){setStatus(false);});}function renderCurrent(){if(!state.overview)return;var r=currentRoute();if(r==='home')renderHome();else if(r==='token')renderToken();else if(r==='flywheel')renderFlywheel();else if(r==='feedback')renderDetailPage('feedback');else if(r==='evolve')renderDetailPage('evolve');else if(r==='abstain'&&typeof renderAbstain==='function')renderAbstain();else if(r==='ingest'&&typeof renderIngest==='function')renderIngest();else if(r==='writeback'&&typeof renderWriteback==='function')renderWriteback();else if(r==='participation'&&typeof renderParticipation==='function')renderParticipation();else if(r==='sessions'&&typeof renderSessions==='function')renderSessions();else if(r==='catalog'&&typeof renderCatalog==='function')renderCatalog();else if(r==='api'&&typeof renderApi==='function')renderApi();else if(r==='detail'&&typeof renderDetail==='function')renderDetail();else renderStub(r);}
 /**
  * 渲染首页概览
  */
@@ -993,7 +1007,9 @@ var COLS = {
   participation: [['session_id','会话ID'],['query_count','查询次数'],['hit_count','命中'],['abstain_count','弃答'],['first_abstain','首次弃答'],['requery_after_abstain','复查'],['evasion','判定']],
   sessions: [['session_id','会话ID'],['query','查询'],['feedback','反馈'],['harvest','沉淀'],['tooltrace','轨迹'],['missing','缺失']],
   catalog: [['entry_id','条目ID'],['entry_type','类型'],['title','标题'],['source','来源'],['heat','热度'],['created_at','创建时间']],
-  api: [['ts','时间'],['api','接口'],['is_test','是否测试']]
+  api: [['ts','时间'],['api','接口'],['is_test','是否测试']],
+  feedback: [['ts','时间'],['session_id','会话'],['entry_id','条目'],['action','动作'],['source','来源']],
+  evolve: [['ts','时间'],['added_edges','新增边'],['decayed','衰减'],['archived','归档']]
 };
 
 // v6 全量对比面板：按任意维度分组，展示全量维度均值对比
@@ -1485,6 +1501,8 @@ function renderDetailPage(metric) {
 
     container.innerHTML = html;
     renderComparePanel(metric);
+if(metric === 'flywheel'){ renderFlywheelPanels(); }
+  if(metric === 'feedback' || metric === 'evolve'){ renderEvolutionHealthStrip(); }
 
     // 绑定事件
     var qInput = document.getElementById('q-' + metric);
@@ -1584,6 +1602,120 @@ function renderDetailPage(metric) {
        }
     }
   });
+}
+
+function getPath(obj, path){ var a=path.split('.'); var cur=obj; for(var i=0;i<a.length;i++){ if(cur==null) return '-'; cur=cur[a[i]]; } return cur==null?'-':cur; }
+function renderFlywheelPanels(){
+  var container = document.getElementById('body-flywheel');
+  if(!container) return;
+  var state = window.state || {};
+  var overview = state.overview || {};
+  var fw = (overview && overview.flywheel) || {};
+  var eh = (overview && overview.evolution_health) || {};
+  var queries = getPath(fw, 'queries') || 0;
+  var hits = getPath(fw, 'hits_total') || 0;
+  var autoSkills = getPath(fw, 'auto_skills') || 0;
+  var intercept = getPath(fw, 'intercept_rate') || 0;
+  var abstain = getPath(fw, 'abstain_rate') || 0;
+  var steps = getPath(fw, 'evolve.steps') || 0;
+  var added = getPath(fw, 'evolve.added_edges') || 0;
+  var decay = getPath(fw, 'evolve.decayed') || 0;
+  var arch = getPath(fw, 'evolve.archived') || 0;
+  var fbTotal = getPath(fw, 'feedback.total') || 0;
+  var fbByAction = getPath(fw, 'feedback.by_action') || {};
+  var fbBySource = getPath(fw, 'feedback.by_source') || {};
+  var fbRate = getPath(eh, 'feedback_rate') || 0;
+  var autoRatio = getPath(eh, 'auto_feedback_ratio') || 0;
+  var gapTotal = getPath(eh, 'gap_total') || 0;
+  var toolTrace = getPath(eh, 'tooltrace_count') || 0;
+  var sessRate = getPath(eh, 'session_complete_rate') || 0;
+
+  var html = '<div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:4px;padding:12px;margin-bottom:12px;">';
+  html += '<div style="font-weight:600;margin-bottom:8px;">飞轮运转概览</div>';
+  html += '<div style="display:flex;flex-wrap:wrap;gap:8px;">';
+  html += '<span style="background:#e0f2fe;color:#0369a1;padding:4px 8px;border-radius:4px;">查询：' + (typeof queries==='number'?fmt(queries):'-') + '</span>';
+  html += '<span style="background:#dcfce7;color:#15803d;padding:4px 8px;border-radius:4px;">命中：' + (typeof hits==='number'?fmt(hits):'-') + '</span>';
+  html += '<span style="background:#fef3c7;color:#d97706;padding:4px 8px;border-radius:4px;">反馈：' + (typeof fbTotal==='number'?fmt(fbTotal):'-') + '</span>';
+  html += '<span style="background:#f3e8ff;color:#9333ea;padding:4px 8px;border-radius:4px;">进化：' + (typeof steps==='number'?fmt(steps):'-') + '</span>';
+  html += '<span style="background:#dcfce7;color:#15803d;padding:4px 8px;border-radius:4px;">更准：' + (typeof autoSkills==='number'?fmt(autoSkills):'-') + '</span>';
+  html += '</div>';
+  html += '<div style="font-size:12px;color:#6b7280;margin-top:4px;">查询 → 命中 → 反馈 → 进化 → 更准</div>';
+  html += '</div>';
+
+  html += '<div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:4px;padding:12px;margin-bottom:12px;">';
+  html += '<div style="font-weight:600;margin-bottom:8px;">运转指标</div>';
+  html += '<div style="display:flex;flex-wrap:wrap;gap:12px;">';
+  html += '<div><span style="font-weight:600;">拦截率:</span> ' + (typeof intercept==='number'?pct(intercept):'-') + '</div>';
+  html += '<div><span style="font-weight:600;">弃答率:</span> ' + (typeof abstain==='number'?pct(abstain):'-') + '</div>';
+  html += '<div><span style="font-weight:600;">自动技能:</span> ' + (typeof autoSkills==='number'?fmt(autoSkills):'-') + '</div>';
+  html += '</div>';
+  html += '</div>';
+
+  html += '<div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:4px;padding:12px;margin-bottom:12px;">';
+  html += '<div style="font-weight:600;margin-bottom:8px;">进化明细</div>';
+  html += '<div style="display:flex;flex-wrap:wrap;gap:12px;">';
+  html += '<div><span style="font-weight:600;">步数:</span> ' + (typeof steps==='number'?fmt(steps):'-') + '</div>';
+  html += '<div><span style="font-weight:600;">新增边:</span> ' + (typeof added==='number'?fmt(added):'-') + '</div>';
+  html += '<div><span style="font-weight:600;">衰减:</span> ' + (typeof decay==='number'?fmt(decay):'-') + '</div>';
+  html += '<div><span style="font-weight:600;">归档:</span> ' + (typeof arch==='number'?fmt(arch):'-') + '</div>';
+  html += '</div>';
+  html += '</div>';
+
+  html += '<div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:4px;padding:12px;margin-bottom:12px;">';
+  html += '<div style="font-weight:600;margin-bottom:8px;">反馈动作分布</div>';
+  html += '<div style="display:flex;flex-wrap:wrap;gap:8px;">';
+  if(fbByAction){
+    for(var key in fbByAction){
+      var val = fbByAction[key];
+      if(typeof val==='number'){
+        html += '<span style="background:#fff7ed;color:#c2410c;padding:4px 8px;border-radius:4px;font-size:12px;">' + key + ': ' + fmt(val) + '</span>';
+      }
+    }
+  }
+  html += '<span style="background:#eff6ff;color:#2563eb;padding:4px 8px;border-radius:4px;font-size:12px;">手动:</span> ' + (typeof fbBySource.manual==='number'?fmt(fbBySource.manual):'-');
+  html += '<span style="background:#f0fdf4;color:#16a34a;padding:4px 8px;border-radius:4px;font-size:12px;">自动:</span> ' + (typeof fbBySource.auto==='number'?fmt(fbBySource.auto):'-');
+  html += '</div>';
+  html += '</div>';
+
+  html += '<div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:4px;padding:12px;">';
+  html += '<div style="font-weight:600;margin-bottom:8px;">自进化健康度</div>';
+  html += '<div style="display:flex;flex-wrap:wrap;gap:12px;">';
+  html += '<div><span style="font-weight:600;">反馈率:</span> ' + (typeof fbRate==='number'?pct(fbRate):'-') + '</div>';
+  html += '<div><span style="font-weight:600;">自动占比:</span> ' + (typeof autoRatio==='number'?pct(autoRatio):'-') + '</div>';
+  html += '<div><span style="font-weight:600;">缺口:</span> ' + (typeof gapTotal==='number'?fmt(gapTotal):'-') + '</div>';
+  html += '<div><span style="font-weight:600;">轨迹:</span> ' + (typeof toolTrace==='number'?fmt(toolTrace):'-') + '</div>';
+  html += '<div><span style="font-weight:600;">完整率:</span> ' + (typeof sessRate==='number'?pct(sessRate):'-') + '</div>';
+  html += '</div>';
+  html += '</div>';
+
+  container.insertAdjacentHTML('afterbegin', html);
+}
+function renderEvolutionHealthStrip(){
+  var containers = [document.getElementById('body-feedback'), document.getElementById('body-evolve')];
+  var hasContainer = containers.some(function(c){ return !!c; });
+  if(!hasContainer) return;
+  var state = window.state || {};
+  var overview = state.overview || {};
+  var eh = (overview && overview.evolution_health) || {};
+  var fbRate = getPath(eh, 'feedback_rate') || 0;
+  var autoRatio = getPath(eh, 'auto_feedback_ratio') || 0;
+  var steps = getPath(eh, 'evolve.steps') || 0;
+  var gapTotal = getPath(eh, 'gap_total') || 0;
+  var toolTrace = getPath(eh, 'tooltrace_count') || 0;
+  var sessRate = getPath(eh, 'session_complete_rate') || 0;
+
+  var html = '<div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:4px;padding:8px;margin-bottom:12px;font-size:13px;">';
+  html += '<span style="font-weight:600;">健康度:</span> ' + (typeof fbRate==='number'?pct(fbRate):'-') + ' | ';
+  html += '<span style="font-weight:600;">自动反馈:</span> ' + (typeof autoRatio==='number'?pct(autoRatio):'-') + ' | ';
+  html += '<span style="font-weight:600;">进化步:</span> ' + (typeof steps==='number'?fmt(steps):'-') + ' | ';
+  html += '<span style="font-weight:600;">缺口:</span> ' + (typeof gapTotal==='number'?fmt(gapTotal):'-') + ' | ';
+  html += '<span style="font-weight:600;">轨迹:</span> ' + (typeof toolTrace==='number'?fmt(toolTrace):'-') + ' | ';
+  html += '<span style="font-weight:600;">完整率:</span> ' + (typeof sessRate==='number'?pct(sessRate):'-');
+  html += '</div>';
+
+  for (var ci = 0; ci < containers.length; ci++) {
+    if (containers[ci]) containers[ci].insertAdjacentHTML('afterbegin', html);
+  }
 }
 
 function renderToken(){renderDetailPage('token');}

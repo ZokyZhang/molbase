@@ -359,8 +359,12 @@ class KBRequestHandler(BaseHTTPRequestHandler):
         if not session_id:
             client_ip = self.client_address[0] if self.client_address else "unknown"
             session_id = f"http::{client_ip}"
-        self.orc.feedback(entry_id, action, session_id=session_id)
-        self._ok({"ok": True, "entry_id": entry_id, "action": action})
+        # v7：可选来源标记，区分显式反馈与系统自动正反馈；非法值一律按 manual
+        source = str(data.get("source", "manual")).strip()
+        if source not in ("manual", "auto"):
+            source = "manual"
+        self.orc.feedback(entry_id, action, session_id=session_id, source=source)
+        self._ok({"ok": True, "entry_id": entry_id, "action": action, "source": source})
 
     def _handle_summarize(self, data: dict[str, Any]) -> None:
         """上下文压缩。"""

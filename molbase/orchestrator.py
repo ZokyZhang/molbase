@@ -1088,6 +1088,18 @@ class Orchestrator:
                 "confidence_threshold": ABSTAIN_CONFIDENCE,
             },
         )
+        # v7 自进化闭环：高置信命中自动正反馈（热度越用越准）+ 工具调用轨迹归因。
+        # 两者都不得影响主链路返回，异常一律吞掉。
+        if not abstain and ranked:
+            self._auto_feedback(ranked[0].entry.entry_id, session_id, confidence)
+        try:
+            self.record_tooltrace(
+                session_id,
+                "query:" + str(route),
+                [{"tool": "molbase_query", "args": {"query": text[:80], "top_k": top_k, "scene": scene}}],
+            )
+        except Exception:
+            pass
         return resp
 
     def _semantic_sim(self, query: str, entry: Entry) -> float:
@@ -1312,28 +1324,56 @@ class Orchestrator:
         return split_blocks(text, max_chars=max_chars)
 
     # ------------------------------------------------------------------ 反馈闭环
-    def feedback(self, entry_id: str, action: str = "hit", session_id: str = "") -> None:
+    def feedback(self, entry_id: str, action: str = "hit", session_id: str = "", source: str = "manual") -> None:
         """
         反馈回写：action 取值 hit / adopt / cite / reject，累加对应热度权重。
 
         - hit / adopt / cite 为正反馈（热度上升）；
         - reject 为负反馈（热度下降，自然沉底）。
         session_id：可选会话标识，用于监控飞轮「反馈」环节归属。
+        source：manual=显式反馈，auto=高置信命中后的隐式正反馈。
+        v7：正反馈累计 5 次自动触发进化，让反馈真正驱动飞轮（而非只记日志）。
         """
-        weight = {
+        weight_map = {
             "hit": FEEDBACK_WEIGHT_HIT,
             "adopt": FEEDBACK_WEIGHT_ADOPT,
             "cite": FEEDBACK_WEIGHT_CITE,
             "reject": FEEDBACK_WEIGHT_REJECT,
-        }.get(action, FEEDBACK_WEIGHT_HIT)
+        }
+        weight = weight_map.get(action, FEEDBACK_WEIGHT_HIT)
         self.store.add_heat(entry_id, weight)
-        # 反馈日志：记录动作（驱动飞轮「反馈」环节统计，而非只看接口调用次数）
-        self.store.record_feedback(session_id, entry_id, action)
+        self.store.record_feedback(session_id, entry_id, action, source=source)
         # 质量底线（进化侧）：reject 累计达到阈值 -> 自动隔离（不参与召回）
         if action == "reject":
             self._maybe_quarantine(entry_id)
-        # 反馈后立即重建索引（热度变化影响后续重排）
+        # v7 反馈驱动进化：正反馈累计到阈值触发一次 evolve（内部已 rebuild）
+        cur = getattr(self, "_feedback_since_evolve", 0)
+        if action in ("hit", "adopt", "cite"):
+            cur += 1
+        self._feedback_since_evolve = cur
+        if cur >= 5:
+            self._feedback_since_evolve = 0
+            self.evolve()
+            return
+        # 未触发进化时重建索引（热度变化影响后续重排）
         self._rebuild()
+
+    def _evolution_health(self) -> dict:
+        """自进化健康度：委托 store 聚合反馈/进化/缺口/轨迹/会话完整率。"""
+        return self.store.evolution_health()
+
+    def _auto_feedback(self, entry_id: str, session_id: str, confidence: float) -> None:
+        """
+        高置信命中后的隐式正反馈：越常被命中的条目热度越高，实现「越用越准」。
+        不触发 rebuild（避免每次 query 都重建索引），热度在下次进化/反馈/入库时生效。
+        """
+        if not entry_id or confidence < 0.6:
+            return
+        try:
+            self.store.add_heat(entry_id, FEEDBACK_WEIGHT_HIT)
+            self.store.record_feedback(session_id, entry_id, "hit", source="auto")
+        except Exception:
+            return
 
     def _maybe_quarantine(self, entry_id: str) -> None:
         """
@@ -2087,6 +2127,7 @@ class Orchestrator:
         )
         abstain = self.store.abstain_aggregate()
         return {
+            "evolution_health": self._evolution_health(),
             "token": {
                 "actual_tokens": agg["actual_tokens"],
                 "baseline_tokens": agg["baseline_tokens"],
@@ -2129,6 +2170,18 @@ class Orchestrator:
 
         # 定义指标映射
         metrics_map = {
+            'feedback': {
+                'summary_fn': lambda: self.store.feedback_aggregate(),
+                'raw_fn': lambda: self.store.feedback_recent(1000),
+                'filter_fields': ('session_id', 'entry_id', 'action', 'source'),
+                'sort_fields': ('ts',)
+            },
+            'evolve': {
+                'summary_fn': lambda: self.store.evolve_aggregate(),
+                'raw_fn': lambda: self.store.evolve_recent(1000),
+                'filter_fields': ('added_edges', 'decayed', 'archived'),
+                'sort_fields': ('ts',)
+            },
             'token': {
                 'summary_fn': lambda: self.store.metric_aggregate(),
                 'raw_fn': lambda: self.store.list_metrics(1000, include_test=include_test),
