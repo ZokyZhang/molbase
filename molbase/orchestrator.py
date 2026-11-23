@@ -2245,6 +2245,9 @@ class Orchestrator:
                 "abstain_rate": agg["abstain_rate"],
             },
             "abstain": abstain,
+            # v7.2 三方向资产落地观测：场景锚定三表 + 弃答补数草稿
+            "scene_assets": self.store.scene_stats(),
+            "drafts": self.store.draft_stats(),
             "ingest": self.store.ingest_aggregate(),
             "writeback": self.store.writeback_recent(10),
             "sessions": self.store.session_summary(),
