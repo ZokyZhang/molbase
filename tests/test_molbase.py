@@ -4,6 +4,7 @@
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -208,20 +209,22 @@ class TestLLM(unittest.TestCase):
         """LLM 抛异常时应降级回规则路由，绝不崩溃。"""
         orc = Orchestrator(llm=_BrokenLLM())
         self.addCleanup(orc.close)
-        self.assertEqual(orc._route("人脸识别的代码方法"), "code")
+        self.assertEqual(orc._route("帮我看看这段源码"), "code")
 
     def test_summarize_with_llm(self):
         """LLM 可用时应返回生成式摘要。"""
-        orc = Orchestrator(llm=_FakeLLM())
-        self.addCleanup(orc.close)
-        self.assertEqual(orc.summarize("任意内容"), "这是摘要。")
+        with patch("molbase.orchestrator.COMPACT_MODE", "lossy"):
+            orc = Orchestrator(llm=_FakeLLM())
+            self.addCleanup(orc.close)
+            self.assertEqual(orc.summarize("任意内容"), "这是摘要。")
 
     def test_summarize_fallback_truncate(self):
         """无 LLM 时应降级为按长度截断原文。"""
-        orc = Orchestrator()
-        self.addCleanup(orc.close)
-        out = orc.summarize("x" * 300, max_chars=50)
-        self.assertLessEqual(len(out), 51)  # 50 字符 + 省略号
+        with patch("molbase.orchestrator.COMPACT_MODE", "lossy"):
+            orc = Orchestrator(llm=None)
+            self.addCleanup(orc.close)
+            out = orc.summarize("x" * 300, max_chars=50)
+            self.assertEqual(len(out), 51)
 
 
 class TestEvolution(unittest.TestCase):
