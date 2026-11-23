@@ -88,6 +88,7 @@ def _response_to_dict(resp: QueryResponse) -> dict[str, Any]:
         "entities": resp.entities,
         "resolved_version_id": resp.resolved_version_id,
         "refs_miss": resp.refs_miss,
+        "skills": list(resp.skills),
     }
 
 
@@ -176,6 +177,11 @@ class KBRequestHandler(BaseHTTPRequestHandler):
         if path == "/gaps":
             limit = int(qs.get("limit", "20"))
             return self._ok({"gaps": self.orc.store.abstain_gaps(limit=limit)})
+        if path == "/api/drafts":
+            # v7.2 弃答补数：草稿统计与清单（status 为空查全部）
+            status = qs.get("status", "pending")
+            limit = min(int(qs.get("limit", "50")), 200)
+            return self._ok({"stats": self.orc.store.draft_stats(), "drafts": self.orc.store.list_drafts(status, limit)})
         if path == "/writeback":
             limit = int(qs.get("limit", "10"))
             return self._ok({"writeback": self.orc.store.writeback_recent(limit=limit)})
@@ -315,6 +321,21 @@ class KBRequestHandler(BaseHTTPRequestHandler):
         if path == "/evolve":
             self.orc.record_api_call("evolve")
             return self._ok(self.orc.evolve())
+        if path == "/gap/generate":
+            # v7.2 弃答补数：从弃答缺口生成草稿（只建草稿不入库）
+            self.orc.record_api_call("gap_generate")
+            limit = int(data.get("limit", 50))
+            return self._ok(self.orc.generate_gap_drafts(limit=limit))
+        if path == "/gap/confirm":
+            # v7.2 弃答补数：显式确认草稿→入库→命中回验
+            self.orc.record_api_call("gap_confirm")
+            draft_id = str(data.get("draft_id", "")).strip()
+            if not draft_id:
+                return self._err(400, "missing 'draft_id'")
+            title = str(data.get("title", "")).strip()
+            content = str(data.get("content", "")).strip()
+            meta = data.get("meta") if isinstance(data.get("meta"), dict) else None
+            return self._ok(self.orc.confirm_gap_draft(draft_id, title, content, meta))
         return self._err(404, "not found")
 
     # ---- 各接口处理器 ----

@@ -294,6 +294,19 @@ class Store:
             )
             """
         )
+        # v7.2 弃答补数草稿表：弃答→草稿→确认入库→命中回验
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS draft_log (
+                draft_id         TEXT PRIMARY KEY,
+                query            TEXT NOT NULL,
+                reason           TEXT DEFAULT '',
+                subreason        TEXT DEFAULT '',
+                status           TEXT DEFAULT 'pending',
+                created_entry_id TEXT DEFAULT '',
+                created_at       DATETIME DEFAULT CURRENT_TIMESTAMP,
+                confirmed_at     DATETIME
+            )
+        """)
         # 趋势快照表：驱动历史趋势曲线，重启不丢（v4 新增）
         cur.execute("""
             CREATE TABLE IF NOT EXISTS metric_snapshots (
@@ -431,6 +444,129 @@ class Store:
         if column not in cols:
             cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
             conn.commit()
+
+    # ------------------------------------------------------------------ 弃答补数草稿（v7.2）
+    def create_draft(self, query: str, reason: str = "", subreason: str = "") -> str:
+        """创建补数草稿（按 query+reason 哈希幂等，重复返回同一 id）。"""
+        import hashlib
+        draft_id = "draft::" + hashlib.md5((query + "|" + reason).encode("utf-8")).hexdigest()[:12]
+        cur = self._conn.cursor()
+        cur.execute("SELECT draft_id FROM draft_log WHERE draft_id=?", (draft_id,))
+        if cur.fetchone():
+            return draft_id
+        cur.execute("INSERT INTO draft_log(draft_id,query,reason,subreason) VALUES (?,?,?,?)", (draft_id, query, reason, subreason))
+        self._conn.commit()
+        return draft_id
+
+    def list_drafts(self, status: str = "pending", limit: int = 50) -> list[dict]:
+        """列出草稿（status 为空则查全部）。"""
+        cur = self._conn.cursor()
+        if status:
+            cur.execute("SELECT draft_id,query,reason,subreason,status,created_entry_id,created_at FROM draft_log WHERE status=? ORDER BY created_at DESC LIMIT ?", (status, limit))
+        else:
+            cur.execute("SELECT draft_id,query,reason,subreason,status,created_entry_id,created_at FROM draft_log ORDER BY created_at DESC LIMIT ?", (limit,))
+        return [dict(r) for r in cur.fetchall()]
+
+    def confirm_draft(self, draft_id: str, created_entry_id: str = "") -> bool:
+        """确认草稿并回填入库条目 id。"""
+        cur = self._conn.cursor()
+        cur.execute("UPDATE draft_log SET status='confirmed',created_entry_id=?,confirmed_at=CURRENT_TIMESTAMP WHERE draft_id=?", (created_entry_id, draft_id))
+        self._conn.commit()
+        return cur.rowcount > 0
+
+    def reject_draft(self, draft_id: str) -> bool:
+        """驳回草稿。"""
+        cur = self._conn.cursor()
+        cur.execute("UPDATE draft_log SET status='rejected',confirmed_at=CURRENT_TIMESTAMP WHERE draft_id=?", (draft_id,))
+        self._conn.commit()
+        return cur.rowcount > 0
+
+    def draft_stats(self) -> dict:
+        """草稿状态分布统计。"""
+        cur = self._conn.cursor()
+        cur.execute("SELECT status,COUNT(*) FROM draft_log GROUP BY status")
+        by_status = {r[0]: r[1] for r in cur.fetchall()}
+        return {"total": sum(by_status.values()), "by_status": by_status}
+
+    def get_draft(self, draft_id: str) -> dict | None:
+        """按 id 取草稿详情。"""
+        cur = self._conn.cursor()
+        cur.execute("SELECT * FROM draft_log WHERE draft_id=?", (draft_id,))
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+    # ------------------------------------------------------------------ 场景锚定层写入（v7.2）
+    def upsert_scene(self, scene_id: str, scene_path: str = "", parent_id: str = "", facets: str = "", description: str = "") -> None:
+        """插入或更新场景（以 scene_id 为主键）。"""
+        import json
+        cur = self._conn.cursor()
+        if isinstance(facets, (dict, list)):
+            facets = json.dumps(facets, ensure_ascii=False)
+        cur.execute(
+            "INSERT OR REPLACE INTO scenes(scene_id,scene_path,parent_id,facets,description) VALUES (?,?,?,?,?)",
+            (scene_id, scene_path, parent_id, facets, description)
+        )
+        self._conn.commit()
+
+    def link_scene_entry(self, scene_id: str, entry_id: str, via: str = "auto", weight: float = 1.0) -> None:
+        """链接场景与条目（以 scene_id,entry_id 为主键）。"""
+        cur = self._conn.cursor()
+        cur.execute(
+            "INSERT OR REPLACE INTO scene_entries(scene_id,entry_id,via,weight) VALUES (?,?,?,?)",
+            (scene_id, entry_id, via, weight)
+        )
+        self._conn.commit()
+
+    def upsert_entity(self, entity: str, entry_id: str, knowledge_id: str = "", source: str = "", confidence: float = 0.0) -> None:
+        """插入或更新实体索引（以 entity,entry_id 为主键）。"""
+        if not entity or not entry_id:
+            return
+        cur = self._conn.cursor()
+        cur.execute(
+            "INSERT OR REPLACE INTO entity_index(entity,entry_id,knowledge_id,source,confidence) VALUES (?,?,?,?,?)",
+            (entity, entry_id, knowledge_id, source, confidence)
+        )
+        self._conn.commit()
+
+    def upsert_version(self, knowledge_id: str, version_id: str, scene_id: str = "", answer_entry_id: str = "", answer_digest: str = "", facets_match: str = "", authority: float = 0.0, confidence: float = 0.0) -> None:
+        """插入或更新知识版本（以 knowledge_id,version_id 为主键）。"""
+        import json
+        if isinstance(facets_match, (dict, list)):
+            facets_match = json.dumps(facets_match, ensure_ascii=False)
+        cur = self._conn.cursor()
+        cur.execute(
+            "INSERT OR REPLACE INTO knowledge_versions(knowledge_id,version_id,scene_id,answer_entry_id,answer_digest,facets_match,authority,confidence) VALUES (?,?,?,?,?,?,?,?)",
+            (knowledge_id, version_id, scene_id, answer_entry_id, answer_digest, facets_match, authority, confidence)
+        )
+        self._conn.commit()
+
+    def scene_stats(self) -> dict:
+        """返回场景锚定层各表记录数统计。"""
+        cur = self._conn.cursor()
+        return {
+            "scenes": cur.execute("SELECT COUNT(*) FROM scenes").fetchone()[0],
+            "scene_entries": cur.execute("SELECT COUNT(*) FROM scene_entries").fetchone()[0],
+            "entity_index": cur.execute("SELECT COUNT(*) FROM entity_index").fetchone()[0],
+            "knowledge_versions": cur.execute("SELECT COUNT(*) FROM knowledge_versions").fetchone()[0],
+        }
+
+    def get_scene_entries(self, scene_id: str, limit: int = 50) -> list[dict]:
+        """获取指定场景下的条目列表（按权重降序）。"""
+        cur = self._conn.cursor()
+        cur.execute(
+            "SELECT entry_id,via,weight FROM scene_entries WHERE scene_id=? ORDER BY weight DESC LIMIT ?",
+            (scene_id, limit)
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+    def get_entities_for_entry(self, entry_id: str) -> list[dict]:
+        """获取指定条目关联的实体列表。"""
+        cur = self._conn.cursor()
+        cur.execute(
+            "SELECT entity,knowledge_id,source,confidence FROM entity_index WHERE entry_id=?",
+            (entry_id,)
+        )
+        return [dict(r) for r in cur.fetchall()]
 
     # ------------------------------------------------------------------ 写操作
     def upsert(self, entry: Entry) -> None:

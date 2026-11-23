@@ -165,6 +165,7 @@ class QueryResponse:
     entities: list = field(default_factory=list)  # 本次抽取的实体（不再丢弃）
     resolved_version_id: str = ""  # 同问异答裁决出的版本 ID（无版本裁决时为空）
     refs_miss: bool = False     # refs 硬约束未命中（用于调用方判断是否允许放宽）
+    skills: list = field(default_factory=list)  # v7.2 隐式复用：与查询相关的自动固化技能摘要
 
 @dataclass
 class IngestResult:
@@ -1088,6 +1089,8 @@ class Orchestrator:
                 "confidence_threshold": ABSTAIN_CONFIDENCE,
             },
         )
+        # v7.2 场景锚定资产回流：把本次查询的场景/实体/版本写回结构化表，供下次裁决复用
+        self._index_query_assets(scene_id, entities, ranked, resolved_version_id)
         # v7 自进化闭环：高置信命中自动正反馈（热度越用越准）+ 工具调用轨迹归因。
         # 两者都不得影响主链路返回，异常一律吞掉。
         if not abstain and ranked:
@@ -1100,6 +1103,8 @@ class Orchestrator:
             )
         except Exception:
             pass
+        # v7.2 工具轨迹隐式复用：查询自动携带相关 skill 摘要（不影响主结果）
+        resp.skills = self._match_auto_skills(text)
         return resp
 
     def _semantic_sim(self, query: str, entry: Entry) -> float:
@@ -1361,6 +1366,99 @@ class Orchestrator:
     def _evolution_health(self) -> dict:
         """自进化健康度：委托 store 聚合反馈/进化/缺口/轨迹/会话完整率。"""
         return self.store.evolution_health()
+
+    def _index_query_assets(self, scene_id: str, entities: list, ranked: list, version_id: str = "") -> None:
+        """v7.2 场景锚定资产回流：把本次查询的场景/命中条目/实体/版本写入结构化表，供下次裁决复用。异常一律吞掉，绝不影响主查询。"""
+        try:
+            if scene_id:
+                self.store.upsert_scene(scene_id)
+            for r in ranked:
+                entry_id = r.entry.entry_id
+                score = getattr(r, 'score', 0.0)
+                self.store.link_scene_entry(scene_id, entry_id, via="auto", weight=round(float(score), 4))
+            if entities and ranked:
+                first_entry_id = ranked[0].entry.entry_id
+                for entity in entities:
+                    self.store.upsert_entity(entity, first_entry_id, source="query")
+            if version_id and ranked:
+                first_entry_id = ranked[0].entry.entry_id
+                score = getattr(ranked[0], 'score', 0.0)
+                self.store.upsert_version(first_entry_id, version_id, scene_id, first_entry_id, authority=round(float(score), 4), confidence=0.0)
+        except Exception:
+            pass
+
+    def generate_gap_drafts(self, limit: int = 50) -> dict:
+        """从弃答缺口生成补数草稿（只建草稿，不自动入库）。"""
+        try:
+            gaps = self.store.abstain_gaps(limit)
+            # 循环外一次性取已有草稿 id 集合，避免循环内重复全表查询
+            seen = {d["draft_id"] for d in self.store.list_drafts("", 10000)}
+            created = 0
+            skipped = 0
+            for gap in gaps:
+                if gap.get("reason") in ("no_data", "weak_match") and gap.get("query"):
+                    # 先按幂等规则算出 id：与 create_draft 内部 md5(query+'|'+reason)[:12] 一致
+                    import hashlib
+                    did = "draft::" + hashlib.md5((gap["query"] + "|" + gap["reason"]).encode("utf-8")).hexdigest()[:12]
+                    if did in seen:
+                        skipped += 1
+                        continue
+                    new_id = self.store.create_draft(gap["query"], gap["reason"], gap.get("subreason", ""))
+                    seen.add(new_id)
+                    created += 1
+            return {"created": created, "skipped": skipped, "pending": len(self.store.list_drafts("pending", 10000))}
+        except Exception as e:
+            return {"created": 0, "skipped": 0, "error": str(e)}
+
+    def confirm_gap_draft(self, draft_id: str, title: str = "", content: str = "", meta: dict | None = None) -> dict:
+        """确认草稿→入库→立即复检命中，形成缺口-补数-验证闭环。必须显式调用才入库。"""
+        try:
+            draft = self.store.get_draft(draft_id)
+            if not draft:
+                return {"ok": False, "error": "draft not found"}
+            q = draft["query"]
+            # draft_id 形如 draft::<hash>，取 hash 段构造入库 entry_id
+            entry_id = "draft::" + draft_id.split("::")[-1]
+            t = title or q
+            c = content or q
+            m = dict(meta or {})
+            m.setdefault("source", "gap_draft")
+            m.setdefault("tags", ["补数"])
+            m.setdefault("query", q)
+            res = self.ingest_knowledge(entry_id, t, c, source="gap_draft", meta=m)
+            state = res.state
+            ok_confirm = self.store.confirm_draft(draft_id, entry_id)
+            resp = self.query(q, top_k=5, label="gap_verify")
+            verified = (not resp.abstain) and resp.confidence >= ABSTAIN_CONFIDENCE
+            return {"ok": True, "draft_id": draft_id, "entry_id": entry_id, "state": state, "confirmed": ok_confirm, "verified": verified, "confidence": round(resp.confidence, 4)}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def _match_auto_skills(self, text: str, top_n: int = 3) -> list[dict]:
+        """v7.2 工具轨迹隐式复用：按查询词命中度，从自动固化技能中挑出最相关的摘要。异常返回空列表，绝不影响主查询。"""
+        try:
+            words = text.lower().split()
+            candidates = []
+            for e in self.store.all_entries():
+                if e.entry_type != "skill":
+                    continue
+                meta = e.meta or {}
+                if not meta.get("auto_generated"):
+                    continue
+                content = e.content or ""
+                search_text = (e.title + " " + str(meta.get("description") or "") + " " + content[:200]).lower()
+                score = sum(1 for w in words if w in search_text)
+                if score > 0:
+                    candidates.append({
+                        "entry_id": e.entry_id,
+                        "title": e.title,
+                        "description": str(meta.get("description") or "")[:120],
+                        "score": score
+                    })
+            candidates.sort(key=lambda x: x["score"], reverse=True)
+            return candidates[:top_n]
+        except Exception:
+            return []
 
     def _auto_feedback(self, entry_id: str, session_id: str, confidence: float) -> None:
         """
