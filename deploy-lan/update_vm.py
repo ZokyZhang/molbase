@@ -91,7 +91,15 @@ def main() -> None:
         sudo(ssh, "systemctl start molbase-lan")
         time.sleep(3)
 
-        # 4) 验证
+        # 4) 确保局域网域名反代配置存在
+        # 历史踩坑：lan-services.conf 被改名成 .bak 后，molbase.lan 会落到默认站点
+        # （family-edu default_server）返回 502/404。此处幂等恢复并热重载，防止复发。
+        print("=== 确保 nginx 反代配置 ===")
+        sudo(ssh, "bash -c \"test -f /etc/nginx/conf.d/lan-services.conf || "
+                  "cp /etc/nginx/conf.d/lan-services.conf.bak-030800 /etc/nginx/conf.d/lan-services.conf\"")
+        sudo(ssh, "bash -c 'nginx -t >/dev/null 2>&1 && nginx -s reload 2>/dev/null || true'")
+
+        # 5) 验证
         print("=== 验证 ===")
         out, err = run(ssh, "systemctl is-active molbase-lan; curl -s -m 5 http://127.0.0.1:8787/health")
         print(out.strip())
