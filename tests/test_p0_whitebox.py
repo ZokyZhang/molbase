@@ -21,7 +21,10 @@ class TestP0WhiteBox(unittest.TestCase):
         """验证配置常量及权重和"""
         self.assertEqual(config.EMBEDDING_BACKEND, "ollama")
         self.assertEqual(config.OLLAMA_EMBED_MODEL, "bge-m3")
-        self.assertEqual(config.ABSTAIN_CONFIDENCE, 0.55)
+        # 弃答线口径演进：v3 原始余弦 0.55 → v9.0 logistic 校准 0.50
+        # → v9.2 按「100 条历史查询回放 + 24 条人工标注」调优到 0.43。
+        # 0.50→0.43 那一档减少的弃答全部落在真问题区间，噪音泄漏条数不变，故取 0.43。
+        self.assertEqual(config.ABSTAIN_CONFIDENCE, 0.43)
         self.assertEqual(config.SCENE_DEFAULT, "global")
         self.assertEqual(config.TAG_FILTER_MODE, "or_boost")
         self.assertEqual(config.SCENE_RELAX_MIN, 2)

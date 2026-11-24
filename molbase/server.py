@@ -89,6 +89,8 @@ def _response_to_dict(resp: QueryResponse) -> dict[str, Any]:
         "resolved_version_id": resp.resolved_version_id,
         "refs_miss": resp.refs_miss,
         "skills": list(resp.skills),
+        # v9.1 原文层定位：命中条目出自哪一节、正文哪个字符区间，供调用方回溯原文
+        "refs": list(resp.refs),
     }
 
 

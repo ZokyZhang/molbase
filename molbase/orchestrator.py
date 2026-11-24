@@ -167,6 +167,7 @@ class QueryResponse:
     resolved_version_id: str = ""  # 同问异答裁决出的版本 ID（无版本裁决时为空）
     refs_miss: bool = False     # refs 硬约束未命中（用于调用方判断是否允许放宽）
     skills: list = field(default_factory=list)  # v7.2 隐式复用：与查询相关的自动固化技能摘要
+    refs: list = field(default_factory=list)    # v9.1 原文层定位：命中条目出自哪一节、正文哪个字符区间
 
 @dataclass
 class IngestResult:
@@ -235,6 +236,8 @@ class Orchestrator:
         self.store = Store(db_path)
         self.skills_dir = Path(skills_dir) if skills_dir else SKILLS_DIR
         self.bm25 = BM25Index()
+        # 库词表缓存（两阶段闸门的阶段1 用），_rebuild 时失效重建
+        self._domain_vocab = None
         self.graph = RelationGraph()
         self.reranker = Reranker()
         self.retriever = Retriever(self.bm25, self.graph)
@@ -259,6 +262,35 @@ class Orchestrator:
         except Exception:
             self._feedback_since_evolve = 0
         self._rebuild()
+        # v9.0 启动自愈：确保条目向量与当前后端/窗口口径一致（增量补算，失败不影响启动）
+        # 仅 hash 后端在启动时补算（毫秒级）；bge-m3 等重型后端由离线回填脚本完成，避免启动阻塞数分钟
+        # 先给默认值：非 hash 后端不会进 if 分支，若不预设，overview 读该字段会 AttributeError
+        self._vector_bootstrap = {"skipped": True}
+        try:
+            from .config import VECTOR_PRECOMPUTE_ENABLED, VECTOR_PRECOMPUTE_BATCH
+            if VECTOR_PRECOMPUTE_ENABLED and str(getattr(self.embedder, "name", "")).startswith("hash"):
+                from .vectorize import ensure_entry_vectors
+                self._vector_bootstrap = ensure_entry_vectors(
+                    self.store, self.embedder, "entry", force=False,
+                    batch_size=VECTOR_PRECOMPUTE_BATCH,
+                )
+        except Exception:
+            self._vector_bootstrap = {"error": "bootstrap skipped"}
+        # v9.1 四层结构（标签词表/主题树/原文切块）自愈。
+        # 默认不在启动时构建：首次切 12000+ 块要 8~110 秒，同步跑会堵住服务端口，
+        # 放后台线程又会长期持有 SQLite 连接（测试临时库 tearDown 报 WinError 32）。
+        # 生产做法是部署时跑 deploy-lan/backfill_vectors.py 离线建一次，
+        # 之后新条目由入库钩子增量维护；运维需要时可显式打开 LAYER_BOOTSTRAP_ON_START。
+        self._layer_bootstrap = {"skipped": True}
+        try:
+            from .config import LAYER_BOOTSTRAP_ON_START, CHUNK_VECTOR_BOOTSTRAP
+            if LAYER_BOOTSTRAP_ON_START and self.store.chunk_stats().get("chunks", 0) == 0:
+                from .kb_layers import rebuild_layers
+                self._layer_bootstrap = rebuild_layers(
+                    self.store, self.embedder, with_vectors=CHUNK_VECTOR_BOOTSTRAP
+                )
+        except Exception:
+            self._layer_bootstrap = {"error": "layer bootstrap skipped"}
 
     def _init_embedder(
         self,
@@ -319,6 +351,8 @@ class Orchestrator:
         ]
         self._resolver = {e.entry_id: e for e in entries}
         self.bm25.build(entries)
+        # 词表随条目集变化，重建时必须让缓存失效，否则阶段1 会用旧词表算覆盖率
+        self._domain_vocab = None
 
         # 重建关联图：每次清空重来，避免边权重重复累加
         self.graph = RelationGraph()
@@ -917,7 +951,9 @@ class Orchestrator:
         t_rerank = now_ms()
         # 语义重排同样用用户原始提问：LLM 改写补充的泛化同义词会稀释语义排序，
         # 把精准条目挤到后面（如 AI 批改模型选型被泛化成"深度学习/NLP"后错配架构设计）。
-        ranked = self.reranker.rerank(hits, embedder=self.embedder, query=text, device_mac=device_mac)
+        ranked = self._rerank_ranked(hits, text, device_mac)
+        # v9.1 原文层补强：长文档再跑一遍块级比对，把「答案在正文后段」的条目捞回来
+        ranked = self._apply_chunk_boost(ranked, text)
 
         # 性能埋点：召回 / 重排（代工环节，不消耗模型 token）
         if self.profiler is not None:
@@ -1000,19 +1036,9 @@ class Orchestrator:
         confidence, strength, margin = self._compute_confidence(
             ranked, text, query_tags=query_tags, scene_id=scene_id, anchor_ids=entities
         )
-        abstain = confidence < ABSTAIN_CONFIDENCE
-        reason, subreason = "", ""  # v6：非弃答时也要落库，避免 detail 构造 NameError
-        # 弃答归因反馈：把「为什么拦」记下来，让弃答变成可整改的缺口信号，
-        # 而非死胡同。reason 按整改方向分档，subreason 给出更细原因。
+        # v9.0 两阶段闸门：阶段1 判「库域内」（查询词覆盖率），阶段2 判「条目质量」（logistic 置信度）
+        abstain, reason, subreason = self._judge_abstain(ranked, confidence, strength, text)
         if abstain:
-            if not ranked:
-                reason, subreason = "no_data", "empty_recall"
-            elif strength < NO_MATCH_STRENGTH:
-                reason, subreason = "no_data", "weak_semantic"
-            elif strength < WEAK_STRENGTH_THRESHOLD:
-                reason, subreason = "weak_match", "low_strength"
-            else:
-                reason, subreason = "ambiguous", "low_margin"
             # 使用同源原始余弦 strength 替代归一化后的 score，消除量纲伪矛盾
             self.store.record_abstain(
                 query=text,
@@ -1032,6 +1058,8 @@ class Orchestrator:
             version_row = self.resolve_version(ranked[0].entry.entry_id, scene_id)
             if version_row:
                 resolved_version_id = str(version_row.get("version_id", "") or "")
+        # v9.1 原文层定位：弃答时不返回定位（避免调用方拿空答案配真引用）
+        refs = [] if abstain else self._collect_refs(ranked)
         resp = QueryResponse(
             route=route,
             results=results,
@@ -1047,6 +1075,7 @@ class Orchestrator:
             entities=entities,
             resolved_version_id=resolved_version_id,
             refs_miss=refs_miss,
+            refs=refs,
         )
 
         # 会话级 token 台账：累计节省比例（baseline<=0 时 ledger 内部自动跳过）
@@ -1144,93 +1173,310 @@ class Orchestrator:
 
     def _semantic_sim(self, query: str, entry: Entry) -> float:
         """
-        计算 query 与条目的原始语义余弦（未归一化），用于置信度。
-        正文截断前 N 字避免长文本稀释语义（title 完整保留）。
+        计算 query 与条目的原始语义余弦（未归一化），用于置信度兜底。
+
+        语义文本必须与预计算/现场重排同口径（统一走 semantic_text），
+        否则同一对「查询-条目」在不同路径下会得到不同余弦，导致 conf 抖动。
         """
-        # 从 config 导入正文截断字符数常量，避免顶部依赖问题
-        from .config import SEMANTIC_SIM_CONTENT_CHARS
-    
         if self.embedder is None:
             return 0.0
-    
+
         try:
-            # 将整篇正文塞进 embed 会导致长正文语义被稀释甚至余弦为负
-            # 实测 title+正文前300字区分度最佳，因此仅截取前 SEMANTIC_SIM_CONTENT_CHARS 个字符
-            entry_text = entry.title + " " + (entry.content or "")[:SEMANTIC_SIM_CONTENT_CHARS]
+            from .vectorize import semantic_text
+            from .config import SEMANTIC_SIM_CONTENT_CHARS
+
+            entry_text = semantic_text(
+                entry.title or "",
+                entry.content or "",
+                entry.summary or "",
+                max_chars=SEMANTIC_SIM_CONTENT_CHARS,
+            )
             q_vec = self.embedder.embed(query)
             e_vec = self.embedder.embed(entry_text)
             return cosine_similarity(q_vec, e_vec)
         except Exception:
             return 0.0
 
-    def _compute_confidence(self, ranked: list[Any], query: str, query_tags: Optional[List[str]] = None, scene_id: str = "", anchor_ids: Optional[List[str]] = None) -> Tuple[float, float, float]:
-        """
-        计算置信度分数。
-        
-        修复说明：无标注信号不参与，避免误惩罚。
-        1. 标签信号：仅当 query_tags 非空且 top1 条目标签非空时参与计算。
-        2. 场景信号：仅当 top1 条目 meta 中确实存在非空 scene 字段时参与计算。
-        3. 实体信号：仅当 anchor_ids 非空且 top1 条目存在实体标注时参与计算。
-        """
-        from .config import CONF_W_STRENGTH, CONF_W_MARGIN, CONF_W_TAG, CONF_W_SCENE, CONF_W_ENTITY, SCENE_MATCH_WEAK
-        if not ranked:
-            return 0.0, 0.0, 0.0
-        # 性能：优先复用 rerank 阶段已算好的 sim_norm（同一次批量 embed 的结果），
-        # 避免 _semantic_sim 再逐条 embed 造成重复 HTTP；旧对象无该字段时回退原路径。
-        def _cos(i: int) -> float:
-            cached = getattr(ranked[i], "sim_norm", None)
-            if cached is not None:
-                return float(cached)
-            return self._semantic_sim(query, ranked[i].entry)
+    def _rerank_ranked(self, hits, text: str, device_mac: str = ""):
+        """优先用预计算向量重排（只编码 1 条 query）；向量覆盖不足或异常时回退现场重排。"""
+        # 两条路径的语义文本窗口必须一致（统一 SEMANTIC_SIM_CONTENT_CHARS=300），否则排序抖动
+        from .config import VECTOR_PRECOMPUTE_ENABLED, VECTOR_MIN_COVERAGE, SEMANTIC_SIM_CONTENT_CHARS
+        limit = SEMANTIC_SIM_CONTENT_CHARS
+        try:
+            if VECTOR_PRECOMPUTE_ENABLED and hits and self.embedder is not None:
+                from .vectorize import model_fingerprint
+                fp = model_fingerprint(self.embedder)
+                # 只取候选集向量：重排不需要全库向量，整表扫会白读 MB 级 BLOB
+                candidate_ids = [h.entry.entry_id for h in hits]
+                vectors = self.store.get_vectors(fp, "entry", owner_ids=candidate_ids)
+                if vectors:
+                    covered = sum(1 for h in hits if h.entry.entry_id in vectors)
+                    coverage = covered / max(1, len(hits))
+                    # 覆盖率达标才用预计算，避免"部分有向量"污染排序
+                    if coverage >= VECTOR_MIN_COVERAGE:
+                        q_vec = self.embedder.embed(text)
+                        if q_vec:
+                            return self.reranker.rerank_with_vectors(hits, q_vec, vectors, device_mac)
+        except Exception:
+            pass
+        return self.reranker.rerank(hits, embedder=self.embedder, query=text,
+                                    device_mac=device_mac, content_limit=limit)
 
-        cos_top1 = _cos(0)
-        strength = max(0.0, min(1.0, cos_top1))
-        margin = 0.0
-        if len(ranked) >= 2:
-            cos_top2 = _cos(1)
-            margin = max(0.0, min(1.0, cos_top1 - cos_top2))
-        terms: List[Tuple[float, float]] = [(strength, CONF_W_STRENGTH), (margin, CONF_W_MARGIN)]
-        
-        # 标签信号：仅当 query_tags 非空 且 top1 条目标签非空时 append 覆盖率；否则跳过
+    def _apply_chunk_boost(self, ranked, text: str):
+        """
+        长文档块级补强：条目级语义分只看正文前 N 字，长文档的答案常在正文后段。
+
+        只对超长条目做，且只在「块级相似度高于条目级」时上调，
+        上调后在 logit 之外直接用加权修正 score 并重排——不做归一化，
+        避免少量条目变动引起全局 min-max 漂移、把整批排序打乱。
+        """
+        from .config import (CHUNK_BOOST_ENABLED, CHUNK_BOOST_MIN_CHARS,
+                             CHUNK_BOOST_WEIGHT)
+        if not CHUNK_BOOST_ENABLED or not ranked or self.embedder is None:
+            return ranked
+        try:
+            from .kb_layers import chunk_vectors_for, max_chunk_similarity
+
+            long_ids = [
+                r.entry.entry_id for r in ranked
+                if len(r.entry.content or "") > CHUNK_BOOST_MIN_CHARS
+            ]
+            if not long_ids:
+                return ranked
+            pairs_map = chunk_vectors_for(self.store, self.embedder, long_ids)
+            if not pairs_map:
+                return ranked
+            q_vec = self.embedder.embed(text)
+            if not q_vec:
+                return ranked
+
+            changed = False
+            for r in ranked:
+                pairs = pairs_map.get(r.entry.entry_id)
+                if not pairs:
+                    continue
+                chunk_sim = max_chunk_similarity(q_vec, pairs)
+                if chunk_sim <= r.sim_norm:
+                    continue
+                new_sim = (1.0 - CHUNK_BOOST_WEIGHT) * r.sim_norm + CHUNK_BOOST_WEIGHT * chunk_sim
+                r.score += self.reranker.w_sim * (new_sim - r.sim_norm)
+                r.sim_norm = new_sim
+                changed = True
+            if changed:
+                ranked.sort(key=lambda x: x.score, reverse=True)
+        except Exception:
+            pass
+        return ranked
+
+    def _collect_refs(self, ranked, limit: int = 3) -> list[dict]:
+        """
+        取 top-N 命中的原文定位信息，供答案标注「出自哪一节第几段」。
+
+        path 是标题栈快照，char_start/char_end 是块在正文中的字符区间，
+        两者足够把结论还原到原文位置，不需要把整段正文再塞回上下文。
+        """
+        refs = []
+        for r in ranked[:limit]:
+            entry_id = r.entry.entry_id
+            try:
+                chunks = self.store.get_chunks(entry_id)
+            except Exception:
+                chunks = []
+            if not chunks:
+                continue
+            # 取最靠前的块作为该条目的代表定位（块序号 0 覆盖文档开头，最常用）
+            c = chunks[0]
+            refs.append({
+                "entry_id": entry_id,
+                "title": r.entry.title,
+                "path": c.get("path") or "",
+                "heading": c.get("heading") or "",
+                "char_start": c.get("char_start", 0),
+                "char_end": c.get("char_end", 0),
+                "chunk_id": c.get("chunk_id", ""),
+            })
+        return refs
+
+    def _judge_abstain(self, ranked, confidence: float, strength: float, text: str):
+        """
+        两阶段弃答判定：阶段1 判「问题是否落在库域内」，阶段2 判「命中条目质量」。
+
+        阶段1 只做归因修正，不引入额外拦截：out_of_domain 要求「查询词几乎不在库词表」
+        且「语义强度也低」，两个条件同时成立才判库外，避免新词/同义词查询被误杀。
+        阶段2 用校准后置信度放行，再用 strength 相对校准中点派生弃答子因。
+
+        子因阈值必须相对 CONF_MID 派生：hash 后端中点 0.26 低于旧的绝对阈值 0.30，
+        若仍用 0.30/0.50，则 strength<0.26 才是 weak_semantic、0.30~0.50 区间根本
+        到不了（conf 已 >=0.5 放行），low_strength/low_margin 会变成永远不可达的死分支。
+        """
+        from .config import ABSTAIN_CONFIDENCE, DOMAIN_COV_MIN, NO_MATCH_STRENGTH, conf_params
+
+        mid, _slope = conf_params(getattr(self.embedder, "name", ""))
+
+        if not ranked:
+            return True, "no_data", "empty_recall"
+
+        try:
+            cov = self._domain_coverage(text)
+        except Exception:
+            cov = 1.0
+        if cov < DOMAIN_COV_MIN and strength < NO_MATCH_STRENGTH:
+            return True, "no_data", "out_of_domain"
+
+        if confidence >= ABSTAIN_CONFIDENCE:
+            return False, "", ""
+
+        # 低于放行线：按 strength 相对中点的位置给出可归因子因
+        if strength < mid:
+            return True, "no_data", "weak_semantic"
+        if strength < mid + 0.10:
+            return True, "weak_match", "low_strength"
+        return True, "ambiguous", "low_margin"
+
+    def _domain_coverage(self, text: str) -> float:
+        """计算查询词在库词表中的覆盖率（两阶段闸门的阶段1判据）。
+        - 用模块顶部已导入的 tokenize（来自 .index）对 text 分词，去重
+        - 只保留长度 >= DOMAIN_COV_TOKEN_MIN_LEN 的词（从 .config 导入）
+        - 词表 = self.bm25.idf 的键集合（BM25Index 构建后 idf 即全库词表）
+        - 返回 命中词数 / 总词数；无有效词时返回 0.0
+        - 异常时返回 1.0（宁可放行交给阶段2质量闸门兜底，不能让异常触发"库外"误杀）
+        """
+        try:
+            from .index import tokenize
+            from .config import DOMAIN_COV_TOKEN_MIN_LEN
+
+            tokens = tokenize(text)
+            unique_tokens = set(tokens)
+            valid_tokens = {t for t in unique_tokens if len(t) >= DOMAIN_COV_TOKEN_MIN_LEN}
+            # 极短查询（如「网」）分词后可能全是单字，此时回退到全 token 集合，
+            # 否则覆盖率恒为 0，会被阶段1 误判成库外问题
+            if not valid_tokens:
+                valid_tokens = unique_tokens
+
+            if not valid_tokens:
+                return 1.0
+
+            vocab = self._domain_vocab
+            if vocab is None:
+                vocab = set(self.bm25.idf.keys())
+                self._domain_vocab = vocab
+            hits = len(valid_tokens & vocab)
+            return hits / len(valid_tokens)
+        except Exception:
+            return 1.0
+
+    def _lexical_coverage(self, query: str, entry) -> float:
+        """
+        查询词在 top1 条目中的 idf 加权覆盖率（0~1）。
+
+        与 _domain_coverage 的区别：那个看「词在不在全库词表里」，判库域；
+        这个看「词在不在这一条命中里」，判这一条命中吃掉了提问的多少信息。
+
+        分母只统计 idf >= LEX_COV_MIN_IDF 的词：像「如何」「怎么」这类高频虚词
+        idf 接近 0，计入分母会把覆盖率稀释成常量，失去判别力。
+        """
+        try:
+            from .index import tokenize
+            from .config import LEX_COV_MIN_IDF, LEX_COV_MIN_TOKENS
+
+            q_tokens = {t for t in tokenize(query) if t}
+            if len(q_tokens) < LEX_COV_MIN_TOKENS:
+                return 0.0
+
+            idf = self.bm25.idf
+            weights = {t: idf[t] for t in q_tokens if t in idf and idf[t] >= LEX_COV_MIN_IDF}
+            # 分母为 0 说明提问里全是库外词或全是虚词，无从判断覆盖率，交回语义分决定
+            total = sum(weights.values())
+            if total <= 0:
+                return 0.0
+            # 只有 1 个词够格时覆盖率非 0 即 1，判别力为零且极易误放（「今天天气怎么样」
+            # 只因命中「今天」就会被算成 100% 覆盖），这类短问不启用词法推断
+            if len(weights) < LEX_COV_MIN_TOKENS:
+                return 0.0
+
+            # 只对 top1 这一条做词面比对：tokenize 一次 300 字文档，代价可忽略
+            entry_text = (entry.title or "") + " " + (entry.content or "")
+            entry_tokens = set(tokenize(entry_text))
+            covered = sum(w for t, w in weights.items() if t in entry_tokens)
+            return max(0.0, min(1.0, covered / total))
+        except Exception:
+            return 0.0
+
+    def _compute_confidence(self, ranked, query: str, query_tags=None, scene_id: str = "",
+                            anchor_ids=None) -> tuple:
+        """
+        计算 (confidence, strength, margin)。
+
+        confidence 主项是按后端标定中点的 logistic 校准值（可当概率读），
+        再叠加标签/场景/实体三项乘性小幅加成；主项 + 加成合起来不超过 1.0。
+
+        strength 取「语义余弦」与「词法覆盖率折算值」的较大者：
+        关键词堆叠型查询会被词袋向量平均化导致余弦虚低，此时词法覆盖率是更可靠的证据。
+        两者都是 0~1 的同量纲量，取 max 不引入新的标定问题。
+        """
+        if not ranked:
+            return (0.0, 0.0, 0.0)
+        import math
+        from .config import (CONF_W_TAG, CONF_W_SCENE, CONF_W_ENTITY,
+                             SCENE_MATCH_WEAK, LEX_COV_ENABLED, LEX_COV_W,
+                             conf_params)
+
+        # 中点/斜率按运行时真实后端取：embedder 可能已从 ollama 静默降级到 hash
+        mid, slope = conf_params(getattr(self.embedder, "name", ""))
+
+        top1 = ranked[0]
+        cos1 = getattr(top1, "sim_norm", None)
+        if cos1 is None:
+            cos1 = self._semantic_sim(query, top1.entry)
+        cos2 = 0.0
+        if len(ranked) > 1:
+            cos2 = getattr(ranked[1], "sim_norm", None)
+            if cos2 is None:
+                cos2 = self._semantic_sim(query, ranked[1].entry)
+
+        strength = max(0.0, min(1.0, float(cos1)))
+        margin = max(0.0, min(1.0, float(cos1) - float(cos2))) if len(ranked) > 1 else 0.0
+
+        # 词法覆盖率下限：只抬升，不降低；覆盖率 1.0 时等价余弦 LEX_COV_W
+        if LEX_COV_ENABLED:
+            cov = self._lexical_coverage(query, top1.entry)
+            strength = max(strength, min(1.0, LEX_COV_W * cov))
+
+        # 主项：logistic 校准（strength==mid 时恰好 0.5）
+        conf = 1.0 / (1.0 + math.exp(-slope * (strength - mid)))
+
+        meta = top1.entry.meta if isinstance(top1.entry.meta, dict) else {}
+
+        # 标签加成：查询标签被条目标签覆盖的比例
         if query_tags:
-            entry_tags = ranked[0].entry.meta.get("tags", [])
-            # 确保 entry_tags 是列表且非空
-            if entry_tags and isinstance(entry_tags, list) and len(entry_tags) > 0:
-                query_tag_set = set(query_tags)
-                entry_tag_set = set(entry_tags)
-                cov = len(query_tag_set & entry_tag_set) / len(query_tag_set) if query_tag_set else 0.0
-                terms.append((cov, CONF_W_TAG))
-        
-        # 场景信号：仅当 top1 条目的 meta 中确实存在非空 scene 字段时 append
+            entry_tags = meta.get("tags")
+            if isinstance(entry_tags, list) and entry_tags:
+                tag_set = set(query_tags)
+                cov = len(tag_set & set(entry_tags)) / max(1, len(tag_set))
+                conf += conf * CONF_W_TAG * cov
+
+        # 场景加成：同场景记满分，弱匹配场景记折减
         if scene_id and scene_id != "global":
-            entry_scene = ranked[0].entry.meta.get("scene")
-            # 只有当 scene 字段存在且非空时才参与计算，避免将未标注伪装成 global
-            if entry_scene is not None and entry_scene != "":
+            entry_scene = meta.get("scene")
+            if entry_scene:
                 scene_score = 1.0 if entry_scene == scene_id else SCENE_MATCH_WEAK
-                terms.append((scene_score, CONF_W_SCENE))
-        
-        # 实体信号：仅当 anchor_ids 非空 且 top1 条目存在实体标注时 append
+                conf += conf * CONF_W_SCENE * scene_score
+
+        # 实体加成：anchor_ids 是路由出来的实体名，不是 entry_id，
+        # 因此先比条目 meta 里的实体集合，未挂实体时用标题包含关系兜底（实体名常直接进标题）
         if anchor_ids:
-            entry_meta = ranked[0].entry.meta
-            # 检查 meta 中是否存在 entities 或 entity_ids 且非空
-            has_entity_annotation = False
-            entities_val = entry_meta.get("entities")
-            entity_ids_val = entry_meta.get("entity_ids")
-            if entities_val and isinstance(entities_val, (list, dict)) and len(entities_val) > 0:
-                has_entity_annotation = True
-            elif entity_ids_val and isinstance(entity_ids_val, (list, dict)) and len(entity_ids_val) > 0:
-                has_entity_annotation = True
-            
-            if has_entity_annotation:
-                entry_id = ranked[0].entry.entry_id
-                entity_score = 1.0 if entry_id in anchor_ids else 0.0
-                terms.append((entity_score, CONF_W_ENTITY))
-        
-        if terms:
-            conf = sum(v * w for v, w in terms) / sum(w for _, w in terms)
-        else:
-            conf = 0.0
-        return round(min(1.0, conf), 4), round(strength, 4), round(margin, 4)
+            anchors = {a for a in anchor_ids if a}
+            ent = meta.get("entities") or meta.get("entity_ids") or []
+            ent_set = set(ent) if isinstance(ent, (list, tuple, set)) else set()
+            if anchors and (ent_set & anchors):
+                conf += conf * CONF_W_ENTITY
+            else:
+                title = top1.entry.title or ""
+                if any(a in title for a in anchors):
+                    conf += conf * CONF_W_ENTITY * 0.6
+
+        conf = max(0.0, min(1.0, conf))
+        return (round(conf, 4), round(strength, 4), round(margin, 4))
 
     # ------------------------------------------------------------------ 网络搜索兜底
     def _should_web_search(self, hits: list[Any]) -> bool:
@@ -1437,7 +1683,7 @@ class Orchestrator:
                 if gap.get("reason") in ("no_data", "weak_match") and gap.get("query"):
                     # 先按幂等规则算出 id：与 create_draft 内部 md5(query+'|'+reason)[:12] 一致
                     import hashlib
-                    did = "draft::" + hashlib.md5((gap["query"] + "|" + gap["reason"]).encode("utf-8")).hexdigest()[:12]
+                    did = "draft::" + hashlib.md5((gap["query"] + "|" + gap["reason"]).encode("utf-8"), usedforsecurity=False).hexdigest()[:12]
                     if did in seen:
                         skipped += 1
                         continue
@@ -1604,6 +1850,26 @@ class Orchestrator:
             )
         )
         self._rebuild()
+        # v9.0 向量预计算：只补算本条（entry_ids 限定），不做全库扫描
+        try:
+            from .config import VECTOR_PRECOMPUTE_ENABLED, VECTOR_PRECOMPUTE_BATCH
+            if VECTOR_PRECOMPUTE_ENABLED:
+                from .vectorize import ensure_entry_vectors
+                ensure_entry_vectors(self.store, self.embedder, "entry", force=False,
+                                     batch_size=VECTOR_PRECOMPUTE_BATCH, entry_ids=[entry_id])
+        except Exception:
+            pass
+        # v9.1 原文层：本条正文切块 + 块向量，保证新知识立刻可溯源、可块级召回
+        try:
+            from .config import CHUNK_INDEX_ENABLED, CHUNK_VECTOR_ENABLED
+            if CHUNK_INDEX_ENABLED:
+                from .kb_layers import index_entry_chunks
+                entry_obj = self._resolver.get(entry_id)
+                if entry_obj is not None:
+                    index_entry_chunks(self.store, self.embedder, entry_obj,
+                                       with_vectors=CHUNK_VECTOR_ENABLED)
+        except Exception:
+            pass
         return IngestResult(entry_id=entry_id, state=state)
 
     def ingest_files(self, device_mac: str, files: list[dict]) -> dict:
@@ -2295,6 +2561,13 @@ class Orchestrator:
             "abstain": abstain,
             # v7.2 三方向资产落地观测：场景锚定三表 + 弃答补数草稿
             "scene_assets": self.store.scene_stats(),
+            # v9.1 四层结构建成度：树/标签/原文，用来看「知识库是否真的长出了结构」
+            "layers": {
+                "tree": self.store.tree_stats(),
+                "tags": {"vocab": len(self.store.tag_df())},
+                "chunks": self.store.chunk_stats(),
+                "vectors": {"precompute": self._vector_bootstrap},
+            },
             "drafts": self.store.draft_stats(),
             "ingest": self.store.ingest_aggregate(),
             "writeback": self.store.writeback_recent(10),

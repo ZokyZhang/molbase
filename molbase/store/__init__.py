@@ -429,6 +429,69 @@ class Store:
         # 索引 semantic_cache.scene_id：加速缓存命中查询
         cur.execute("CREATE INDEX IF NOT EXISTS idx_semantic_cache_scene_id ON semantic_cache(scene_id)")
 
+        # 7. 创建 vector_index 表：条目/原文块的向量索引（v9.0）
+        # 主键含 owner_kind：同一 owner_id 在 entry 与 chunk 两个命名空间下可共存向量，
+        # 且后续若引入多粒度（标题级/段落级）向量不必再改表。
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS vector_index (
+                owner_id TEXT NOT NULL, owner_kind TEXT NOT NULL, model_fp TEXT NOT NULL,
+                dim INTEGER NOT NULL, vec BLOB NOT NULL, text_hash TEXT DEFAULT '',
+                updated_at REAL NOT NULL,
+                PRIMARY KEY (owner_id, owner_kind, model_fp)
+            )
+        """)
+        # 回填查询与按后端统计都走 (model_fp, owner_kind) 组合，索引列序与查询条件对齐
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_vector_index_kind ON vector_index(model_fp, owner_kind)")
+
+        # 迁移：早期开发库里 vector_index 主键是 (owner_id, model_fp)，缺 owner_kind。
+        # CREATE TABLE IF NOT EXISTS 对已存在的表不生效，若不重建，entry 与 chunk 的
+        # 同 id 向量会互相覆盖。向量可重算，直接重建最安全。
+        pk_cols = [r[1] for r in cur.execute("PRAGMA table_info(vector_index)").fetchall()
+                   if len(r) > 5 and r[5]]
+        if pk_cols and "owner_kind" not in pk_cols:
+            cur.execute("DROP TABLE vector_index")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS vector_index (
+                    owner_id TEXT NOT NULL, owner_kind TEXT NOT NULL, model_fp TEXT NOT NULL,
+                    dim INTEGER NOT NULL, vec BLOB NOT NULL, text_hash TEXT DEFAULT '',
+                    updated_at REAL NOT NULL,
+                    PRIMARY KEY (owner_id, owner_kind, model_fp)
+                )
+            """)
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_vector_index_kind ON vector_index(model_fp, owner_kind)")
+
+        # 8. 原文层（v9.1）：条目切块后的原文块，承载「引用回溯」与「块级精准召回」
+        #    path 是标题栈快照（如 "部署/VM/端口"），char_start/char_end 是块在条目正文中的字符区间，
+        #    两者合起来足以把一句答案精确还原到原文位置。
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS chunks (
+                chunk_id TEXT PRIMARY KEY,
+                entry_id TEXT NOT NULL,
+                ordinal INTEGER NOT NULL,
+                heading TEXT DEFAULT '',
+                path TEXT DEFAULT '',
+                char_start INTEGER DEFAULT 0,
+                char_end INTEGER DEFAULT 0,
+                text_len INTEGER DEFAULT 0,
+                body TEXT NOT NULL,
+                text_hash TEXT DEFAULT '',
+                updated_at REAL NOT NULL
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_chunks_entry ON chunks(entry_id, ordinal)")
+
+        # 9. 受控标签词表（v9.1）：把自由标签收敛成「归一化标签 -> 父标签 + 文档频次」
+        #    df 用于给标签加成做 idf 加权，避免「通用/其他」这类高频标签贡献虚假置信度。
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS tag_vocab (
+                tag TEXT PRIMARY KEY,
+                parent TEXT DEFAULT '',
+                df INTEGER DEFAULT 0,
+                updated_at REAL NOT NULL
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_tag_vocab_parent ON tag_vocab(parent)")
+
         conn.commit()
 
     def _ensure_column(self, conn: sqlite3.Connection, table: str, column: str, decl: str) -> None:
@@ -445,11 +508,179 @@ class Store:
             cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
             conn.commit()
 
+    # ------------------------------------------------------------------ 向量索引（v9.0）
+    @staticmethod
+    def _pack_vec(vec: list) -> tuple:
+        """把 float 列表打包成 float32 BLOB，返回 (blob, dim)。统一字节序避免跨平台误读。"""
+        import struct
+        dim = len(vec)
+        return struct.pack(f"<{dim}f", *vec), dim
+
+    @staticmethod
+    def _unpack_vec(blob, dim: int) -> list | None:
+        """把 float32 BLOB 解包成 float 列表；长度与 dim 不符时返回 None（脏数据自愈）。"""
+        import struct
+        if not blob:
+            return None
+        try:
+            if len(blob) != int(dim) * 4:
+                return None
+            return list(struct.unpack(f"<{int(dim)}f", blob))
+        except Exception:
+            return None
+
+    def upsert_vector(self, owner_id: str, owner_kind: str, model_fp: str, vec: list, text_hash: str = "") -> None:
+        """插入或更新单条向量（主键 owner_id+owner_kind+model_fp）。"""
+        self.upsert_vectors([(owner_id, owner_kind, model_fp, vec, text_hash)])
+
+    def upsert_vectors(self, rows: list) -> int:
+        """
+        批量插入或更新向量，整批只提交一次。
+
+        rows 为 (owner_id, owner_kind, model_fp, vec, text_hash) 元组列表。
+        返回实际写入条数；空向量条目直接跳过（不做静默零向量占位，
+        否则零向量会被当成「已有向量」进入重排，把真实条目压下去）。
+        """
+        import time
+        if not rows:
+            return 0
+        now = time.time()
+        payload = []
+        for owner_id, owner_kind, model_fp, vec, text_hash in rows:
+            if not vec:
+                continue
+            blob, dim = self._pack_vec(vec)
+            payload.append((owner_id, owner_kind, model_fp, dim, blob, text_hash or "", now))
+        if not payload:
+            return 0
+        cur = self._conn.cursor()
+        cur.executemany(
+            "INSERT OR REPLACE INTO vector_index(owner_id, owner_kind, model_fp, dim, vec, text_hash, updated_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            payload,
+        )
+        self._conn.commit()
+        return len(payload)
+
+    def get_vector(self, owner_id: str, model_fp: str, owner_kind: str = "entry") -> list | None:
+        """按 owner_id + 后端指纹取单条向量，返回 float 列表或 None。"""
+        cur = self._conn.cursor()
+        cur.execute(
+            "SELECT vec, dim FROM vector_index WHERE owner_id = ? AND model_fp = ? AND owner_kind = ?",
+            (owner_id, model_fp, owner_kind),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        return self._unpack_vec(row[0], row[1])
+
+    def get_vectors(self, model_fp: str, owner_kind: str = "", owner_ids: list | None = None) -> dict:
+        """
+        按后端指纹批量取向量，返回 {owner_id: [float]}。
+
+        owner_ids 为明确候选集时必须传入：重排只需要候选集的向量，
+        不传会整表扫（条目上千时白读 MB 级 BLOB）。
+        """
+        result = {}
+        cur = self._conn.cursor()
+        if owner_ids is not None and len(owner_ids) > 0:
+            # SQLite 默认变量上限 999，留余量按 900 分批
+            batch_size = 900
+            for i in range(0, len(owner_ids), batch_size):
+                batch = owner_ids[i:i + batch_size]
+                placeholders = ",".join(["?"] * len(batch))
+                # 拼接进去的只有字面量占位符 ?，所有取值都走 params 绑定
+                sql = f"SELECT owner_id, vec, dim FROM vector_index WHERE model_fp = ? AND owner_id IN ({placeholders})"  # nosec B608
+                params = [model_fp] + list(batch)
+                if owner_kind:
+                    sql += " AND owner_kind = ?"
+                    params.append(owner_kind)
+                cur.execute(sql, params)
+                for owner_id, vec_blob, dim in cur.fetchall():
+                    v = self._unpack_vec(vec_blob, dim)
+                    if v is not None:
+                        result[owner_id] = v
+            return result
+
+        sql = "SELECT owner_id, vec, dim FROM vector_index WHERE model_fp = ?"
+        params = [model_fp]
+        if owner_kind:
+            sql += " AND owner_kind = ?"
+            params.append(owner_kind)
+        cur.execute(sql, params)
+        for owner_id, vec_blob, dim in cur.fetchall():
+            v = self._unpack_vec(vec_blob, dim)
+            if v is not None:
+                result[owner_id] = v
+        return result
+
+    def get_vector_hashes(self, model_fp: str, owner_kind: str = "") -> dict:
+        """返回 {owner_id: text_hash}，用于向量增量更新判断。"""
+        query = "SELECT owner_id, text_hash FROM vector_index WHERE model_fp = ?"
+        params = [model_fp]
+        if owner_kind:
+            query += " AND owner_kind = ?"
+            params.append(owner_kind)
+        cursor = self._conn.cursor()
+        cursor.execute(query, params)
+        result = {}
+        for owner_id, text_hash in cursor.fetchall():
+            result[owner_id] = text_hash if text_hash is not None else ""
+        return result
+
+    def count_vectors(self, model_fp: str = "", owner_kind: str = "") -> int:
+        """统计向量数量，支持 model_fp 和 owner_kind 过滤。"""
+        cur = self._conn.cursor()
+        if model_fp or owner_kind:
+            conditions = []
+            params = []
+            if model_fp:
+                conditions.append("model_fp = ?")
+                params.append(model_fp)
+            if owner_kind:
+                conditions.append("owner_kind = ?")
+                params.append(owner_kind)
+            # conditions 只由本方法内硬编码的 "列 = ?" 片段拼成，无外部字符串
+            query = f"SELECT COUNT(*) FROM vector_index WHERE {' AND '.join(conditions)}"  # nosec B608
+            cur.execute(query, params)
+        else:
+            cur.execute("SELECT COUNT(*) FROM vector_index")
+        return cur.fetchone()[0]
+
+    def delete_vectors(self, owner_id: str = "", model_fp: str = "", owner_kind: str = "") -> int:
+        """
+        删除向量，返回删除行数。
+
+        安全约束：owner_id 为空时**拒绝全表删除**，必须显式给 model_fp 或 owner_kind
+        做范围限定。整表清空只允许走 rebuild_vectors 这类显式维护入口，
+        避免一个漏传参数把整库向量抹掉。
+        """
+        cur = self._conn.cursor()
+        conditions = []
+        params = []
+        if owner_id:
+            conditions.append("owner_id = ?")
+            params.append(owner_id)
+        if model_fp:
+            conditions.append("model_fp = ?")
+            params.append(model_fp)
+        if owner_kind:
+            conditions.append("owner_kind = ?")
+            params.append(owner_kind)
+        if not conditions:
+            # 无任何限定条件：直接返回 0，不做删除
+            return 0
+        # conditions 只由本方法内硬编码的 "列 = ?" 片段拼成，无外部字符串
+        query = f"DELETE FROM vector_index WHERE {' AND '.join(conditions)}"  # nosec B608
+        cur.execute(query, params)
+        self._conn.commit()
+        return cur.rowcount
+
     # ------------------------------------------------------------------ 弃答补数草稿（v7.2）
     def create_draft(self, query: str, reason: str = "", subreason: str = "") -> str:
         """创建补数草稿（按 query+reason 哈希幂等，重复返回同一 id）。"""
         import hashlib
-        draft_id = "draft::" + hashlib.md5((query + "|" + reason).encode("utf-8")).hexdigest()[:12]
+        draft_id = "draft::" + hashlib.md5((query + "|" + reason).encode("utf-8"), usedforsecurity=False).hexdigest()[:12]
         cur = self._conn.cursor()
         cur.execute("SELECT draft_id FROM draft_log WHERE draft_id=?", (draft_id,))
         if cur.fetchone():
@@ -1349,6 +1580,280 @@ class Store:
                 "detail": detail,
             })
         return out
+
+    # ------------------------------------------------------------------ 原文层：切块（v9.1）
+    def save_chunks(self, entry_id: str, chunks: list[dict]) -> int:
+        """
+        覆盖写入某个条目的全部切块（先删后插，整批一次提交）。
+
+        chunks 每项需含 chunk_id / ordinal / heading / path / char_start / char_end /
+        text_len / body / text_hash。返回写入块数。
+        覆盖写入而非增量：条目正文一变，块边界全部位移，增量合并会留下孤儿块。
+        """
+        import time
+        if not entry_id:
+            return 0
+        now = time.time()
+        cur = self._conn.cursor()
+        cur.execute("DELETE FROM chunks WHERE entry_id = ?", (entry_id,))
+        payload = []
+        for c in chunks or []:
+            payload.append((
+                c.get("chunk_id") or f"{entry_id}::{c.get('ordinal', 0)}",
+                entry_id,
+                int(c.get("ordinal", 0)),
+                c.get("heading") or "",
+                c.get("path") or "",
+                int(c.get("char_start", 0)),
+                int(c.get("char_end", 0)),
+                int(c.get("text_len", len(c.get("body") or ""))),
+                c.get("body") or "",
+                c.get("text_hash") or "",
+                now,
+            ))
+        if payload:
+            cur.executemany(
+                "INSERT OR REPLACE INTO chunks(chunk_id, entry_id, ordinal, heading, path, "
+                "char_start, char_end, text_len, body, text_hash, updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                payload,
+            )
+        self._conn.commit()
+        return len(payload)
+
+    def save_all_chunks(self, rows: list[dict], clear: bool = True, chunk_size: int = 500) -> int:
+        """
+        批量全量写入切块（重建原文层专用），返回写入块数。
+
+        与 save_chunks 的区别：全库重建时逐条目 commit 会把 730 次 fsync 变成主要耗时
+        （实测首次建 12426 块要 8 分钟）。这里 clear 一次、分批 executemany、
+        最后只 commit 一次，把提交次数从 O(条目数) 降到 1。
+        """
+        import time
+        now = time.time()
+        cur = self._conn.cursor()
+        if clear:
+            cur.execute("DELETE FROM chunks")
+        payload = []
+        for c in rows or []:
+            payload.append((
+                c.get("chunk_id") or f"{c.get('entry_id', '')}::{c.get('ordinal', 0)}",
+                c.get("entry_id", ""),
+                int(c.get("ordinal", 0)),
+                c.get("heading") or "",
+                c.get("path") or "",
+                int(c.get("char_start", 0)),
+                int(c.get("char_end", 0)),
+                int(c.get("text_len", len(c.get("body") or ""))),
+                c.get("body") or "",
+                c.get("text_hash") or "",
+                now,
+            ))
+        for i in range(0, len(payload), chunk_size):
+            cur.executemany(
+                "INSERT OR REPLACE INTO chunks(chunk_id, entry_id, ordinal, heading, path, "
+                "char_start, char_end, text_len, body, text_hash, updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                payload[i:i + chunk_size],
+            )
+        self._conn.commit()
+        return len(payload)
+
+    def get_chunks(self, entry_id: str) -> list[dict]:
+        """按条目取切块列表（按 ordinal 升序），用于引用回溯与块级召回。"""
+        cur = self._conn.cursor()
+        cur.execute(
+            "SELECT chunk_id, ordinal, heading, path, char_start, char_end, text_len, body, text_hash "
+            "FROM chunks WHERE entry_id = ? ORDER BY ordinal",
+            (entry_id,),
+        )
+        return [
+            {
+                "chunk_id": r[0], "ordinal": r[1], "heading": r[2], "path": r[3],
+                "char_start": r[4], "char_end": r[5], "text_len": r[6],
+                "body": r[7], "text_hash": r[8],
+            }
+            for r in cur.fetchall()
+        ]
+
+    def get_chunk(self, chunk_id: str) -> dict | None:
+        """按 chunk_id 取单个切块（引用回溯用）。"""
+        cur = self._conn.cursor()
+        cur.execute(
+            "SELECT chunk_id, entry_id, ordinal, heading, path, char_start, char_end, body "
+            "FROM chunks WHERE chunk_id = ?",
+            (chunk_id,),
+        )
+        r = cur.fetchone()
+        if not r:
+            return None
+        return {
+            "chunk_id": r[0], "entry_id": r[1], "ordinal": r[2], "heading": r[3],
+            "path": r[4], "char_start": r[5], "char_end": r[6], "body": r[7],
+        }
+
+    def chunk_stats(self) -> dict:
+        """切块覆盖统计：{entries_with_chunks, chunks, avg_chunks}，用于观测原文层建成度。"""
+        cur = self._conn.cursor()
+        total = cur.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+        owners = cur.execute("SELECT COUNT(DISTINCT entry_id) FROM chunks").fetchone()[0]
+        return {
+            "chunks": int(total),
+            "entries_with_chunks": int(owners),
+            "avg_chunks": round(total / owners, 2) if owners else 0.0,
+        }
+
+    def get_chunk_hashes(self, entry_id: str) -> dict:
+        """返回 {chunk_id: text_hash}，用于判断某条目的切块是否需要重算。"""
+        cur = self._conn.cursor()
+        cur.execute("SELECT chunk_id, text_hash FROM chunks WHERE entry_id = ?", (entry_id,))
+        return {r[0]: (r[1] or "") for r in cur.fetchall()}
+
+    # ------------------------------------------------------------------ 标签词表（v9.1）
+    def rebuild_tag_vocab(self, alias_map: dict | None = None) -> dict:
+        """
+        从全库条目的 meta.tags 重建受控词表，返回 {tags, parents}。
+
+        alias_map 是「别名 -> 规范标签」的映射（如 {"部署":"运维"}），
+        归一化后同一概念只占一个词条，df 才是真实文档频次。
+        """
+        import time
+        alias_map = alias_map or {}
+        df: dict[str, int] = {}
+        for e in self.all_entries():
+            tags = e.meta.get("tags") or []
+            if isinstance(tags, str):
+                tags = [tags]
+            seen = set()
+            for t in tags:
+                key = str(t).strip()
+                if not key:
+                    continue
+                key = alias_map.get(key, key)
+                if key in seen:
+                    continue
+                seen.add(key)
+                df[key] = df.get(key, 0) + 1
+
+        now = time.time()
+        cur = self._conn.cursor()
+        cur.execute("DELETE FROM tag_vocab")
+        payload = [(t, "", c, now) for t, c in df.items()]
+        if payload:
+            cur.executemany(
+                "INSERT OR REPLACE INTO tag_vocab(tag, parent, df, updated_at) VALUES (?,?,?,?)",
+                payload,
+            )
+        self._conn.commit()
+        return {"tags": len(payload), "parents": 0}
+
+    def tag_df(self) -> dict:
+        """返回 {tag: 文档频次}。词表为空时退回实时统计，保证加成逻辑永远有值可用。"""
+        cur = self._conn.cursor()
+        rows = cur.execute("SELECT tag, df FROM tag_vocab").fetchall()
+        if rows:
+            return {r[0]: int(r[1]) for r in rows}
+        return self.tag_stats()
+
+    # ------------------------------------------------------------------ 主题树（v9.1）
+    def rebuild_topic_tree(self, nodes: list[dict]) -> int:
+        """
+        重建主题树，返回写入节点数。
+
+        nodes 每项含 topic_name / parent_name / level / scene_id；
+        topic_id 由自增分配，parent_id 按 parent_name 反查（父节点必须先于子节点出现在列表里）。
+        """
+        cur = self._conn.cursor()
+        cur.execute("DELETE FROM topic_tree")
+        name_to_id: dict[str, int] = {}
+        next_id = 1
+        payload = []
+        for n in nodes or []:
+            name = str(n.get("topic_name") or "").strip()
+            if not name:
+                continue
+            tid = next_id
+            next_id += 1
+            parent_name = str(n.get("parent_name") or "").strip()
+            pid = name_to_id.get(parent_name, 0) if parent_name else 0
+            name_to_id[name] = tid
+            payload.append((tid, name, pid, int(n.get("level", 1)), n.get("scene_id") or ""))
+        if payload:
+            cur.executemany(
+                "INSERT OR REPLACE INTO topic_tree(topic_id, topic_name, parent_id, level, scene_id) "
+                "VALUES (?,?,?,?,?)",
+                payload,
+            )
+        self._conn.commit()
+        return len(payload)
+
+    def tree_children(self, topic_id: int = 0) -> list[dict]:
+        """取某节点的直接子节点（topic_id=0 取根层），用于树导航与路径回溯。"""
+        cur = self._conn.cursor()
+        cur.execute(
+            "SELECT topic_id, topic_name, parent_id, level, scene_id FROM topic_tree "
+            "WHERE parent_id = ? ORDER BY topic_name",
+            (int(topic_id),),
+        )
+        return [
+            {"topic_id": r[0], "topic_name": r[1], "parent_id": r[2], "level": r[3], "scene_id": r[4]}
+            for r in cur.fetchall()
+        ]
+
+    def tree_path(self, topic_id: int) -> list[str]:
+        """从根到该节点的主题名路径（最多 8 层，防脏数据成环导致死循环）。"""
+        cur = self._conn.cursor()
+        path = []
+        cur_id = int(topic_id)
+        for _ in range(8):
+            row = cur.execute(
+                "SELECT topic_name, parent_id FROM topic_tree WHERE topic_id = ?", (cur_id,)
+            ).fetchone()
+            if not row:
+                break
+            path.append(row[0])
+            if not row[1]:
+                break
+            cur_id = int(row[1])
+        return list(reversed(path))
+
+    def tree_stats(self) -> dict:
+        """树规模统计：{nodes, roots, max_level}。"""
+        cur = self._conn.cursor()
+        nodes = cur.execute("SELECT COUNT(*) FROM topic_tree").fetchone()[0]
+        roots = cur.execute("SELECT COUNT(*) FROM topic_tree WHERE parent_id = 0").fetchone()[0]
+        max_level = cur.execute("SELECT COALESCE(MAX(level), 0) FROM topic_tree").fetchone()[0]
+        return {"nodes": int(nodes), "roots": int(roots), "max_level": int(max_level)}
+
+    # ------------------------------------------------------------------ 关系网 PMI 治理（v9.1）
+    def cooccur_pmi_pairs(self, min_count: int = 2, min_pmi: float = 0.0,
+                          limit: int = 2000) -> list[tuple[str, str, float]]:
+        """
+        按 PMI 给共现边重新定权，返回 [(a, b, pmi)] 降序。
+
+        PMI = log( (cnt/N) / ((df_a/N) * (df_b/N)) ) = log( cnt*N / (df_a*df_b) )
+        动机：原始 cnt 会奖励「到处都出现」的高频词对，PMI 惩罚纯高频、奖励真正专属的关联。
+        df 取 tag_vocab 的词频作近似——共现对的两端是标题/标签词，与标签词表同域。
+        数据不足（任一 df 为 0 或 cnt 为 0）时该边记 0 分，不参与治理排序。
+        """
+        import math
+        cur = self._conn.cursor()
+        rows = cur.execute("SELECT a, b, cnt FROM cooccur WHERE cnt >= ?", (int(min_count),)).fetchall()
+        if not rows:
+            return []
+        df = self.tag_df()
+        total = float(max(1, sum(df.values())))
+        out = []
+        for a, b, cnt in rows:
+            dfa = float(df.get(a, 0))
+            dfb = float(df.get(b, 0))
+            if dfa <= 0 or dfb <= 0 or not cnt:
+                continue
+            pmi = math.log((float(cnt) * total) / (dfa * dfb))
+            if pmi >= min_pmi:
+                out.append((a, b, round(pmi, 4)))
+        out.sort(key=lambda x: x[2], reverse=True)
+        return out[:limit]
 
     def tag_stats(self) -> dict:
         """统计各标签（meta.tags）覆盖的条目数，返回 {tag: count}（按数量倒序）。"""

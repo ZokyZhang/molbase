@@ -38,10 +38,15 @@ FILES = [
     "molbase/llm.py",
     "molbase/summarize.py",
     "molbase/retrieval/__init__.py",
+    # v9.0/v9.1 新增：向量预计算、Markdown 切块、知识库四层（树/网/标签/原文）
+    "molbase/vectorize.py",
+    "molbase/chunking.py",
+    "molbase/kb_layers.py",
     "molbase/dashboard.html",
     "molbase_mcp.py",
     "deploy-lan/molbase-lan.service",
     "deploy-lan/start-server.sh",
+    "deploy-lan/backfill_vectors.py",
 ]
 
 
@@ -64,6 +69,21 @@ def sudo(ssh: paramiko.SSHClient, cmd: str) -> tuple[str, str]:
     return run(ssh, f"echo '{VM_PASS}' | sudo -S {cmd}")
 
 
+def _unit_backend() -> str:
+    """
+    从本地 systemd unit 里读出服务实际使用的向量后端。
+
+    为什么不能硬编码：unit 与 config.py 的后端可能不同（VM 为了性能锁 hash，
+    开发机默认 bge-m3）。回填必须跟服务一致，否则算出的向量服务查不到。
+    """
+    unit = LOCAL_ROOT / "deploy-lan" / "molbase-lan.service"
+    for line in unit.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line.startswith("Environment=MOLBASE_EMBEDDING_BACKEND="):
+            return line.split("=", 2)[2].strip()
+    return "hash"
+
+
 def main() -> None:
     ssh = connect()
     sftp = ssh.open_sftp()
@@ -80,6 +100,23 @@ def main() -> None:
         print("=== 停旧服务 ===")
         run(ssh, "pkill -f 'molbase.server' || true")
         time.sleep(1)
+
+        # 2.5) 离线回填向量（v9.1）：必须在服务起来之前跑完。
+        # 理由：730 条目要切 12000+ 块并算向量，实测 8~110 秒；放启动路径会堵住端口。
+        # 后端必须与服务一致：systemd 里写的 hash 在 ssh 会话里不存在，
+        # 不显式传就会用 config 默认的 bge-m3，12000+ 块逐条推理要几小时。
+        print("=== 离线回填向量与原文层 ===")
+        backend = _unit_backend()
+        print(f"  使用后端: {backend}")
+        out, err = run(
+            ssh,
+            f"cd {VM_TARGET} && MOLBASE_EMBEDDING_BACKEND={backend} "
+            f"timeout 900 python3 deploy-lan/backfill_vectors.py --chunks --backend {backend} 2>&1 | tail -20",
+            timeout=960,
+        )
+        print(out.strip() or "(无输出)")
+        if err.strip():
+            print("backfill stderr:", err.strip()[:300])
 
         # 3) 安装 systemd 常驻（覆盖旧 unit 后重载）
         print("=== 安装 systemd ===")

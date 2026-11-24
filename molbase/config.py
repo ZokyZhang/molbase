@@ -355,7 +355,11 @@ OLLAMA_EMBED_ENDPOINT = "http://127.0.0.1:11434"
 OLLAMA_EMBED_MODEL = "bge-m3"
 OLLAMA_EMBED_DIM = 1024
 OLLAMA_EMBED_TIMEOUT = 20.0
-SEMANTIC_SIM_CONTENT_CHARS = 300  # _semantic_sim 只取 title+正文前300字，避免长正文稀释
+# 语义文本窗口（唯一口径）：标题+摘要完整保留，正文只取前 N 字。
+# 现场精排（rerank）、预计算入库（vectorize）、预计算重排（rerank_with_vectors）三处必须同口径，
+# 否则同一对「查询-条目」在两条路径下会算出不同相似度，导致排序抖动。
+# 实测 300 优于 1500：放宽到 1500 会让泛化型大文档压过精准小文档（策略类问题 top1 从第4掉到第8）。
+SEMANTIC_SIM_CONTENT_CHARS = 300
 # v6 性能：语义精排只对 BM25 召回池的前 N 条做向量推理（CPU 上每条约 16ms）。
 # 40 条全量精排需 600ms+；16 条虽快但会漏掉排名靠后的真实命中（实测 golden 6/8），
 # 折中 32 条：golden 8/8 且延迟约 400-500ms。未进窗口者语义分记 0，不用 BM25 冒充。
@@ -429,6 +433,125 @@ RERANK_WEIGHT_SIM = 0.75
 COLD_DECAY_DAYS = 3.0
 ARCHIVE_DAYS = 7.0
 ARCHIVE_HEAT_MAX = 2.0
+
+
+# ============================================================
+# v9.0 语义置信度重构（logistic 校准 + 两阶段闸门 + 向量预计算）
+#
+# 根因：旧 conf 是「加权平均」，只有 strength+margin 有信号时天花板 0.786，
+# 且 strength 用原始余弦（hash 后端值域 0.2~0.5），导致 conf 普遍 0.2x 被误拦。
+# 改法：① 语义文本窗口统一走 SEMANTIC_SIM_CONTENT_CHARS（实测 300，勿放宽到 1500）；
+#       ② conf 改为按后端标定中点的 logistic 单调映射，输出可当概率解释；
+#       ③ 闸门拆两阶段：先判「问题是否在库域内」，再判「条目质量」；
+#       ④ 条目向量离线预计算，查询时只编码 1 条 query，消除 32 条现场推理的超时风险。
+# ============================================================
+# 向量预计算总开关：入库时离线算好条目向量，查询时只编码 1 条 query
+VECTOR_PRECOMPUTE_ENABLED = True
+# 预计算批大小（每批 embed 条数，过大在弱 CPU 上易超时）
+VECTOR_PRECOMPUTE_BATCH = 16
+# 预计算向量最小覆盖率：候选集中有向量的比例低于该值时回退现场重排，避免部分向量污染排序
+VECTOR_MIN_COVERAGE = 0.8
+
+# 置信度校准中点：该后端下「刚好算命中」的余弦值，按实测分布取值
+#   hash  ：正常命中余弦中位约 0.311，负样本 0.12~0.18 → 中点 0.26
+#   ollama：bge-m3 真命中 0.47~0.83，负样本 0.22~0.46 → 中点 0.50
+CONF_MID = {"hash": 0.26, "ollama": 0.50, "sentence-transformers": 0.42}
+# logistic 斜率：越大越"陡"，区分度越高但同时容错空间越小。
+# 按后端区分：hash 词袋余弦标准差仅约 0.05，用 8.0 会把 0.26~0.36 压成 0~1 的二值跳变，
+# 因此降到 4.0 保持连续可分；bge-m3 分布更宽（σ≈0.12），8.0 才能拉开差距。
+CONF_SLOPE = 8.0
+CONF_SLOPE_MAP = {"hash": 4.0, "ollama": 8.0, "sentence-transformers": 6.0}
+# 当前后端的校准中点（由 v8.0 块解析出的最终后端决定，作为默认值兜底）
+CONF_MID_CURRENT = CONF_MID.get(_engine_name, CONF_MID["ollama"])
+
+
+def conf_params(backend_name: str = "") -> tuple:
+    """
+    按运行时真实后端名返回 (中点, 斜率)。
+
+    为什么必须按运行时判定：create_embedder 可能在 ollama 不可达时静默降级到 hash，
+    此时 config 顶部按 env 解析出的 _engine_name 仍是 ollama，沿用 ollama 的中点 0.50
+    会让所有 hash 余弦（0.2~0.4）恒低于中点，conf 永远 <0.5 → 全部弃答。
+    """
+    name = backend_name or _engine_name
+    mid = CONF_MID.get(name, CONF_MID["ollama"])
+    slope = CONF_SLOPE_MAP.get(name, CONF_SLOPE)
+    return mid, slope
+
+# 两阶段闸门：阶段1 域内判定——查询词（长度>=2）在库词表中的覆盖率低于该值视为库外问题
+DOMAIN_COV_MIN = 0.15
+# 参与覆盖率统计的最短词长（单字噪音大，不计入）
+DOMAIN_COV_TOKEN_MIN_LEN = 2
+
+# logistic 校准后的弃答线（策略旋钮，不是标定旋钮）
+#
+# confidence 本身仍是校准值（strength==中点时为 0.5），这里调的是「多大概率才敢答」。
+# 实测依据（100 条历史真实查询全量回放，hash 后端）：
+#   弃答线 0.50 → 弃答 31%   0.45 → 20%   0.44 → 20%   0.43 → 13%   0.40 → 9%
+# 人工标注的 12 条噪音 / 12 条真问题分布：
+#   噪音 0.31~0.51（多数 ≤0.35），真问题 0.43~0.91。
+# 0.50→0.43 这一档减少的弃答全部落在「真问题」区间，噪音泄漏条数不变（4/12），
+# 因此 0.43 是当前后端下的占优选择（同样泄漏、更少弃答）。
+# 剩余 4 条噪音泄漏（关键词撞词面）需靠 bge-m3 的语义区分度解决，不是阈值能解决的。
+if "MOLBASE_ABSTAIN_CONFIDENCE" not in _os.environ:
+    ABSTAIN_CONFIDENCE = 0.43
+    FEEDBACK_MIN_CONFIDENCE = round(ABSTAIN_CONFIDENCE * 0.85, 4)
+
+
+# ============================================================
+# v9.1 知识库四层模型（树 / 网 / 标签 / 原文）
+#
+# 目的：把「一堆平铺条目」升级成「可导航、可关联、可统计、可溯源」的结构，
+#       让检索除了「词汇匹配」之外还有结构信号可用。
+# ============================================================
+# 原文层切块参数：单块上限字符数与硬切重叠字符数。
+# 1200 字对应一个完整小节，能装下「背景+做法+结论」而不至于把多个主题混进一块。
+CHUNK_MAX_CHARS = 1200
+CHUNK_OVERLAP_CHARS = 100
+# 入库时是否同步生成原文切块（切块本身毫秒级，块向量另由 CHUNK_VECTOR_ENABLED 控制）
+CHUNK_INDEX_ENABLED = True
+# 启动自愈时是否重建四层（树/标签/原文）。
+# 默认关闭：首次构建 730 条目要切 12000+ 块（8~110 秒），
+#   同步跑会堵住服务端口让客户端 RemoteDisconnected；
+#   放后台线程又会长期持有 SQLite 连接，导致测试临时库 tearDown 时报 WinError 32。
+# 因此改为「部署时用 deploy-lan/backfill_vectors.py 离线建一次」，
+# 之后新条目靠入库钩子增量维护（毫秒级），运维需要时可把此项打开。
+LAYER_BOOTSTRAP_ON_START = False
+# 入库时是否同步计算块向量（hash 后端毫秒级可开；ollama 后端建议离线回填后置 False）
+CHUNK_VECTOR_ENABLED = True
+# 启动自愈时是否连块向量一起算（仅在 LAYER_BOOTSTRAP_ON_START 打开时有意义）
+CHUNK_VECTOR_BOOTSTRAP = True
+# 块级补强：只对正文长度超过该值的条目启用（短文档条目级向量已覆盖全文，无需块级）
+CHUNK_BOOST_MIN_CHARS = 1200
+# 块级相似度在最终语义分中的权重：0.35 表示「以条目级为主，块级做修正」
+CHUNK_BOOST_WEIGHT = 0.35
+# 词法覆盖下限（v9.2）
+#
+# 现象：一批「关键词堆叠型」真问题被误杀——「MySQL Redis EMQX 局域网 启动配置」
+# 词面高度匹配，但 hash 词袋把 20 个关键词平均成一个向量，与 300 字条目的余弦只有 0.2x，
+# conf 卡在 0.42~0.49 被判弃答。这不是「库里没有」，是语义平均化的度量缺陷。
+#
+# 为什么不用 BM25 原始分做下限：实测 BM25 分值跨查询不可比——
+# 「给我讲个冷笑话」5.63 高于「MolBase 架构」4.89，用绝对阈值会把噪音放进来。
+# 改用「查询自身信息量归一化的词法覆盖率」：
+#     cov = top1 命中的查询词 idf 之和 / 查询全部有效词 idf 之和
+# 它对查询长度免疫，衡量的是「这条命中吃掉了提问的多少信息」。
+#
+# 取值依据：cov=1.0（全命中）等价余弦 0.55，高于 hash 中点 0.26、也高于 bge-m3 中点 0.50，
+# 只作为下限抬升，不改变任何排序。
+LEX_COV_ENABLED = True
+LEX_COV_W = 0.55
+# 参与统计的词的最低 idf：低于该值的词（如「如何」「怎么」）几乎不携带信息，不计入分母
+LEX_COV_MIN_IDF = 1.0
+# 有效词少于该数量时不做词法推断（一个词的查询无从判断覆盖率）
+LEX_COV_MIN_TOKENS = 2
+
+# 块级补强总开关。
+# 实测结论（730 条目 / 12426 块 / hash 后端）：开启后长文档被块级分抬进 top1，
+# 挤掉了原本精准的短文档，5 条金标问题的 conf 从 0.85/0.60/0.75/0.91/0.85
+# 掉到 0.68/0.41/0.57/0.78/0.71，其中 1 条由放行变弃答。
+# 因此默认关闭：块级向量继续用于「原文溯源」与后续块级召回实验，但不参与打分。
+CHUNK_BOOST_ENABLED = False
 
 
 # ---------------------------------------------------------------------------

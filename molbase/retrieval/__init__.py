@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -79,65 +80,53 @@ class Reranker:
         embedder: Optional[EmbeddingProvider] = None,
         query: str = "",
         device_mac: Optional[str] = None,
+        content_limit: int = 0,
     ) -> list[RankedResult]:
-        """
-        对召回命中做三信号综合重排，返回综合得分降序的 FINAL_TOP_K 条。
-
-        语义分策略：
-        - 无 embedder（或 embedder 异常）：退化为 BM25 得分归一化（零模型基线）。
-        - 有 embedder：用 query 与各命中内容的余弦相似度作为语义分。
-          计算全程 try/except，失败自动回退 BM25，绝不抛错。
+        """语义精排：BM25 召回池做向量相似度打分，融合热度与新鲜度。
+        content_limit 用于与预计算向量口径对齐（传 0 时取 SEMANTIC_SIM_CONTENT_CHARS）。
         """
         if not hits:
             return []
 
+        from ..config import SEMANTIC_SIM_CONTENT_CHARS, SEMANTIC_RERANK_LIMIT
+        from ..vectorize import semantic_text
+        limit = content_limit if content_limit > 0 else SEMANTIC_SIM_CONTENT_CHARS
+
         heats = [h.entry.heat for h in hits]
         freshes = [self.freshness(h.entry.last_access) for h in hits]
 
-        # ---- 语义相关度：优先向量相似度，失败/缺失回退 BM25 ----
         sims: list[float]
         if embedder is not None and query:
             try:
-                from ..config import SEMANTIC_SIM_CONTENT_CHARS, SEMANTIC_RERANK_LIMIT
-                # 只精排召回池前 N 条（性能），其余保持 BM25 顺序不参与语义分
                 rerank_hits = hits[:SEMANTIC_RERANK_LIMIT]
-                texts = [query] + [
-                    h.entry.title + " " + (h.entry.content or "")[:SEMANTIC_SIM_CONTENT_CHARS]
+                texts = [
+                    semantic_text(h.entry.title, h.entry.content or "", h.entry.summary or "", limit)
                     for h in rerank_hits
                 ]
-                # 性能：支持批量的后端一次 HTTP 拿全部向量；旧后端逐条兼容
+                q_vec = embedder.embed(query)
                 batch_fn = getattr(embedder, "embed_batch", None)
                 if batch_fn is not None:
-                    vecs = batch_fn(texts)
-                    q_vec = vecs[0]
-                    sims = [cosine_similarity(q_vec, v) for v in vecs[1:]]
+                    # 批量后端：一次前向拿全部条目向量，降低推理开销
+                    entry_vecs = batch_fn(texts)
                 else:
-                    q_vec = embedder.embed(query)
-                    sims = [
-                        cosine_similarity(q_vec, embedder.embed(h.entry.title + " " + (h.entry.content or "")[:SEMANTIC_SIM_CONTENT_CHARS]))
-                        for h in rerank_hits
-                    ]
-                # 未进入精排窗口的候选语义分记 0（未评估），保证 sims 与 hits 等长。
-                # 绝不能拿 BM25 分冒充语义分——BM25 首条常接近 1.0，会把负例 strength
-                # 抬到 1.0 造成全量误放行。它们仍参与综合分里的热度/BM25 排序。
+                    # 无批量接口的后端（tfidf 等）必须逐条 embed，不能把文本当向量参与余弦
+                    entry_vecs = [embedder.embed(t) for t in texts]
+                sims = [cosine_similarity(q_vec, v) for v in entry_vecs]
+                # 超出精排窗口的条目语义分记 0（不用 BM25 冒充语义分）
                 if len(sims) < len(hits):
                     sims = list(sims) + [0.0] * (len(hits) - len(sims))
+                # 归一化必须在 try 内完成，避免上层拿到非法值时在 try 外崩掉整个查询
+                sim_n = [max(0.0, min(1.0, float(s))) for s in sims]
             except Exception:
-                sims = [h.score for h in hits]  # 模型失效 -> 回退 BM25
+                sim_n = [max(0.0, min(1.0, h.score)) for h in hits]
         else:
-            sims = [h.score for h in hits]
-
-        # 语义分用绝对余弦（bge-m3 有量纲意义），不做相对归一化，
-        # 避免 0.70 与 0.66 的真实差距被抹平后被热度分反超。
-        sim_n = [max(0.0, min(1.0, s)) for s in sims]
+            sim_n = [max(0.0, min(1.0, h.score)) for h in hits]
         heat_n = _normalize(heats)
         fresh_n = _normalize(freshes)
 
         results: list[RankedResult] = []
         for hit, s, h, f in zip(hits, sim_n, heat_n, fresh_n):
-            # 计算基础综合得分
             score = self.w_sim * s + self.w_heat * h + self.w_fresh * f
-            # 若 device_mac 非空且条目匹配，则增加设备加权分
             if device_mac and hit.entry.meta.get("device_mac") == device_mac:
                 score += DEVICE_BOOST
             results.append(
@@ -151,6 +140,56 @@ class Reranker:
             )
 
         results.sort(key=lambda r: r.score, reverse=True)
+        return results[:FINAL_TOP_K]
+
+    def rerank_with_vectors(self, hits, q_vec, vectors, device_mac: str = "") -> list:
+        """
+        使用预计算的条目向量进行重排打分（查询侧只编码 1 条 query）。
+
+        vectors 形如 {entry_id: [float]}；向量缺失或维度不符的条目语义分记 0.0。
+        精排窗口与 rerank() 保持一致（只对前 SEMANTIC_RERANK_LIMIT 条算语义分），
+        否则两条路径在同一批候选上会产出不同排序。
+        点积等价余弦的前提是双方都已 L2 归一化；此处显式做一次归一化兜底，
+        防止某个后端返回未归一化向量时相似度被放大到 >1 后被 clamp 成常数。
+        """
+        if not hits:
+            return []
+
+        from ..config import SEMANTIC_RERANK_LIMIT
+
+        heats = [h.entry.heat for h in hits]
+        freshes = [self.freshness(h.entry.last_access) for h in hits]
+        heat_n = _normalize(heats)
+        fresh_n = _normalize(freshes)
+
+        q_norm = math.sqrt(sum(a * a for a in q_vec)) or 1.0
+
+        results = []
+        for i, hit in enumerate(hits):
+            entry = hit.entry
+            entry_id = entry.entry_id
+
+            s = 0.0
+            v = vectors.get(entry_id)
+            if i < SEMANTIC_RERANK_LIMIT and v is not None and len(v) == len(q_vec):
+                v_norm = math.sqrt(sum(b * b for b in v)) or 1.0
+                s = sum(a * b for a, b in zip(q_vec, v)) / (q_norm * v_norm)
+                s = max(0.0, min(1.0, s))
+
+            score = self.w_sim * s + self.w_heat * heat_n[i] + self.w_fresh * fresh_n[i]
+
+            if device_mac and entry.meta.get("device_mac") == device_mac:
+                score += DEVICE_BOOST
+
+            results.append(RankedResult(
+                entry=entry,
+                score=score,
+                heat_norm=heat_n[i],
+                fresh_norm=fresh_n[i],
+                sim_norm=s
+            ))
+
+        results.sort(key=lambda x: x.score, reverse=True)
         return results[:FINAL_TOP_K]
 
 

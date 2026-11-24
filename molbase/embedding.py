@@ -78,7 +78,7 @@ class HashEmbedding:
         tokens = tokenize(text)
         pairs: list[tuple[int, int]] = []
         for tok in tokens:
-            h = hashlib.md5(tok.encode("utf-8")).digest()
+            h = hashlib.md5(tok.encode("utf-8"), usedforsecurity=False).digest()
             # 用前 8 字节做桶下标，第 9 字节的奇偶做符号（±1）
             bucket = int.from_bytes(h[:8], "big") % self.dim
             sign = 1 if h[8] % 2 == 0 else -1
@@ -161,7 +161,7 @@ class TfidfEmbedding:
         vec = [0.0] * self.dim
         for term in tokenize(text):
             w = self.idf.get(term, 1.0)  # 未登录词用默认权重
-            h = hashlib.md5(term.encode("utf-8")).digest()
+            h = hashlib.md5(term.encode("utf-8"), usedforsecurity=False).digest()
             bucket = int.from_bytes(h[:8], "big") % self.dim
             sign = 1 if h[8] % 2 == 0 else -1
             vec[bucket] += w * sign
@@ -179,7 +179,7 @@ def simhash(text: str, dim: int = 64) -> int:
 
     v = [0] * dim
     for term in tokenize(text):
-        h = hashlib.md5(term.encode("utf-8")).digest()
+        h = hashlib.md5(term.encode("utf-8"), usedforsecurity=False).digest()
         for i in range(dim):
             bit = (h[i // 8] >> (i % 8)) & 1
             v[i] += 1 if bit else -1
