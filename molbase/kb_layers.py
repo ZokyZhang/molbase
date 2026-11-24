@@ -121,14 +121,16 @@ def index_entry_chunks(store, embedder, entry, max_chars: int = CHUNK_MAX_CHARS,
     saved = store.save_chunks(entry.entry_id, chunks)
 
     vectors = 0
-    if with_vectors and chunks and embedder is not None:
+    # 微块不算向量：语义等于文档标题，会成为对任何查询都中等相似度的吸附点
+    vec_chunks = [c for c in chunks if c["text_len"] >= CHUNK_VECTOR_MIN_CHARS]
+    if with_vectors and vec_chunks and embedder is not None:
         try:
             fp = model_fingerprint(embedder)
             # 块向量按「标题 + 块正文」构造：只给块正文会丢掉它属于哪篇文档的语境
-            texts = [f"{entry.title}\n{c['body']}" for c in chunks]
+            texts = [f"{entry.title}\n{c['body']}" for c in vec_chunks]
             vecs = embedder.embed_batch(texts)
             rows = []
-            for c, v in zip(chunks, vecs):
+            for c, v in zip(vec_chunks, vecs):
                 if v:
                     rows.append((c["chunk_id"], "chunk", fp, v, c["text_hash"]))
             vectors = store.upsert_vectors(rows)
@@ -188,13 +190,16 @@ def max_chunk_similarity(q_vec: list, pairs: list) -> float:
     return max(0.0, min(1.0, best))
 
 
-def build_topic_tree_nodes(entries, max_children: int = 200) -> list[dict]:
+def build_topic_tree_nodes(entries, max_children: int = 0) -> list[dict]:
     """
     从条目集生成两层主题树节点：根层 = 受控标签，子层 = 该标签下的条目标题。
 
     只做两层是刻意的选择：三层以上需要真实聚类依据（现在没有），
     硬凑出来的层级会让导航变成噪音。标签层已经能回答「这类知识我都存了什么」。
     无标签的条目归入「未分类」，保证树能覆盖全库、不留孤儿。
+
+    max_children=0 表示不截断。早期默认 200，实测把 1462 个节点砍成 705（丢 52%），
+    树长不全等于导航漏一半内容——宁可树大一点，也不要静默丢节点。
     """
     by_tag: dict[str, list] = {}
     for e in entries:
@@ -207,7 +212,9 @@ def build_topic_tree_nodes(entries, max_children: int = 200) -> list[dict]:
     nodes = []
     for tag in sorted(by_tag.keys()):
         nodes.append({"topic_name": tag, "parent_name": "", "level": 1, "scene_id": ""})
-        titles = sorted(set(by_tag[tag]))[:max_children]
+        titles = sorted(set(by_tag[tag]))
+        if max_children and max_children > 0:
+            titles = titles[:max_children]
         for title in titles:
             nodes.append({"topic_name": title, "parent_name": tag, "level": 2, "scene_id": ""})
     return nodes
@@ -254,8 +261,13 @@ def rebuild_layers(store, embedder=None, entries=None, with_vectors: bool = Fals
     if fp and all_chunks:
         title_map = {e.entry_id: (e.title or "") for e in all_entries}
         pending: list[tuple] = []
-        for i in range(0, len(all_chunks), batch_size):
-            batch = all_chunks[i:i + batch_size]
+        # 微块（短于 CHUNK_VECTOR_MIN_CHARS 的标题行/近空段）不参与块向量：
+        # 它们的语义等于文档标题，会对任何查询产生中等相似度，成为排名吸附点。
+        # 实测 12440 块里 2105 块 text_len < 120，绝大多数是标题行。
+        from .config import CHUNK_VECTOR_MIN_CHARS
+        vec_chunks = [c for c in all_chunks if c["text_len"] >= CHUNK_VECTOR_MIN_CHARS]
+        for i in range(0, len(vec_chunks), batch_size):
+            batch = vec_chunks[i:i + batch_size]
             try:
                 texts = [f"{title_map.get(c['entry_id'], '')}\n{c['body']}" for c in batch]
                 vecs = embedder.embed_batch(texts)

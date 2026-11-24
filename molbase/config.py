@@ -77,6 +77,10 @@ AUTO_HIT_HEAT = 1.0
 
 # 共现建边阈值：两个条目在同一查询中共同命中达到该次数后，自动建立关联
 COOCCUR_THRESHOLD = 3
+# 共现建边的 PMI 下限（v9.2）：cnt 高的边不一定是专属关联，枢纽条目会跟谁都共现。
+# 0.0 表示「只剔除比随机共现还弱的边」（PMI<0），是保守起点；
+# 实测 823 条边中 PMI>=0 保留 543 条，被剔的多数是 max≤3 的测试噪音边。
+COOCCUR_PMI_MIN = 0.0
 
 # 类型感知共现建边：True = 仅同类型条目（知识↔知识、代码↔代码、技能↔技能）自动建边，
 # 减少跨类型噪音关联（知识误连技能等）；False = 允许跨类型关联。
@@ -461,8 +465,9 @@ CONF_MID = {"hash": 0.26, "ollama": 0.50, "sentence-transformers": 0.42}
 # 因此降到 4.0 保持连续可分；bge-m3 分布更宽（σ≈0.12），8.0 才能拉开差距。
 CONF_SLOPE = 8.0
 CONF_SLOPE_MAP = {"hash": 4.0, "ollama": 8.0, "sentence-transformers": 6.0}
-# 当前后端的校准中点（由 v8.0 块解析出的最终后端决定，作为默认值兜底）
-CONF_MID_CURRENT = CONF_MID.get(_engine_name, CONF_MID["ollama"])
+# 注：不设 CONF_MID_CURRENT —— 导入期按 env 算出的中点会在 create_embedder
+# 静默降级后失效，已成为事故源（hash 余弦配 ollama 中点 → 全部弃答）。
+# 中点一律经 conf_params(运行时后端名) 取，不要在模块级缓存。
 
 
 def conf_params(backend_name: str = "") -> tuple:
@@ -508,6 +513,9 @@ if "MOLBASE_ABSTAIN_CONFIDENCE" not in _os.environ:
 # 1200 字对应一个完整小节，能装下「背景+做法+结论」而不至于把多个主题混进一块。
 CHUNK_MAX_CHARS = 1200
 CHUNK_OVERLAP_CHARS = 100
+# 参与块向量的最短块长：低于该值的块多是标题行/近空段，语义等于文档标题，
+# 对任何查询都有中等相似度，会变成排名吸附点。只影响向量，切块本身保留。
+CHUNK_VECTOR_MIN_CHARS = 120
 # 入库时是否同步生成原文切块（切块本身毫秒级，块向量另由 CHUNK_VECTOR_ENABLED 控制）
 CHUNK_INDEX_ENABLED = True
 # 启动自愈时是否重建四层（树/标签/原文）。
@@ -566,6 +574,19 @@ PAGERANK_DAMPING = 0.85
 PAGERANK_MAX_ITER = 100
 # PageRank 收敛阈值
 PAGERANK_TOLERANCE = 1e-6
+
+
+# ---------------------------------------------------------------------------
+# 二次应用外部覆盖（模块最后一步）
+#
+# 第 396 行的 _apply_overrides 只作用于它之前的常量；v8.0/v9.x 新增的
+# VECTOR_* / CHUNK_* / LEX_COV_* / CONF_* 都写在它之后，导致这些参数
+# 「写了环境变量也不生效」，回滚只能改代码重启（实测
+# MOLBASE_VECTOR_PRECOMPUTE_ENABLED=false 无效）。
+# 这里幂等地再应用一次，让全部常量都能通过 config.json / 环境变量回滚。
+# 约束：本行之后不得再出现常量赋值，否则又会出现同样的问题。
+# ---------------------------------------------------------------------------
+_apply_overrides(_load_external_overrides())
 
 
 def ensure_dirs() -> None:

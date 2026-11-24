@@ -1059,7 +1059,7 @@ class Orchestrator:
             if version_row:
                 resolved_version_id = str(version_row.get("version_id", "") or "")
         # v9.1 原文层定位：弃答时不返回定位（避免调用方拿空答案配真引用）
-        refs = [] if abstain else self._collect_refs(ranked)
+        refs = [] if abstain else self._collect_refs(ranked, text)
         resp = QueryResponse(
             route=route,
             results=results,
@@ -1234,6 +1234,13 @@ class Orchestrator:
                              CHUNK_BOOST_WEIGHT)
         if not CHUNK_BOOST_ENABLED or not ranked or self.embedder is None:
             return ranked
+        # 硬闸：这条路径实测有害（见 reports/ 第五节），而且它会同时改 sim_norm
+        # 与 score —— sim_norm 正是置信度的输入，一开等于悄悄换掉标定口径。
+        # 靠一个布尔值「默认关」的防护强度为零，这里直接拒绝执行，避免误开。
+        raise RuntimeError(
+            "chunk boost 已实测有害（长文档挤占 top1、金标 conf 全线下滑），"
+            "启用前必须重做 logistic 标定，见 reports/MolBase-v9.2降弃答与知识库四层升级.md 第五节"
+        )
         try:
             from .kb_layers import chunk_vectors_for, max_chunk_similarity
 
@@ -1268,7 +1275,38 @@ class Orchestrator:
             pass
         return ranked
 
-    def _collect_refs(self, ranked, limit: int = 3) -> list[dict]:
+    def _pick_ref_chunk(self, query: str, chunks: list[dict]) -> dict:
+        """
+        在条目的所有块里挑「最可能是答案所在」的那一块，用于引用定位。
+
+        为什么不能直接取 chunks[0]：长文档的答案常在正文后段（正文中位 2684 字、
+        平均 17 块），固定指向第一块等于系统性地把引用指到文档开头，构成引用错位。
+        这里用「查询词在块正文中的命中数」选块——不额外调模型（避免再付一次
+        embed 成本），对「答案段落包含提问关键词」这个常见情形足够准。
+        全不命中时退回第一块（此时本来也无从判断）。
+        """
+        if not chunks:
+            return {}
+        if len(chunks) == 1:
+            return chunks[0]
+        try:
+            from .index import tokenize
+            q_tokens = {t for t in tokenize(query) if len(t) >= 2}
+            if not q_tokens:
+                return chunks[0]
+            best = chunks[0]
+            best_hits = -1
+            for c in chunks:
+                body = c.get("body") or ""
+                hits = sum(1 for t in q_tokens if t in body)
+                if hits > best_hits:
+                    best_hits = hits
+                    best = c
+            return best
+        except Exception:
+            return chunks[0]
+
+    def _collect_refs(self, ranked, query: str = "", limit: int = 3) -> list[dict]:
         """
         取 top-N 命中的原文定位信息，供答案标注「出自哪一节第几段」。
 
@@ -1284,8 +1322,7 @@ class Orchestrator:
                 chunks = []
             if not chunks:
                 continue
-            # 取最靠前的块作为该条目的代表定位（块序号 0 覆盖文档开头，最常用）
-            c = chunks[0]
+            c = self._pick_ref_chunk(query, chunks)
             refs.append({
                 "entry_id": entry_id,
                 "title": r.entry.title,

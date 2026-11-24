@@ -20,6 +20,7 @@ from __future__ import annotations
 from .config import (
     COLD_DECAY_DAYS,
     COLD_DECAY_FACTOR,
+    COOCCUR_PMI_MIN,
     COOCCUR_SAME_TYPE_ONLY,
     COOCCUR_THRESHOLD,
 )
@@ -54,12 +55,28 @@ class EvolutionEngine:
         """
         stats: dict[str, int] = {"edges": 0, "cold_decayed": 0}
 
-        # 1. 共现自动建边（类型感知：跨类型共现不建边，减少噪音关联）
+        # 1. 共现自动建边（类型感知 + PMI 去高频）
+        # 只看 cnt 阈值会把「到处都和别人一起出现」的枢纽条目连成一张稠密网：
+        # 这类边 cnt 很高但不是专属关联。用 PMI 把「纯高频」压掉，只留真正专属的强关联。
+        # PMI 取不到（表为空/数据不足）时退回纯 cnt 阈值，不让治理逻辑反而把建边停掉。
+        pmi_map = {}
+        try:
+            pmi_map = {(a, b): w for a, b, w in self.store.cooccur_pmi_pairs(COOCCUR_THRESHOLD)}
+        except Exception:
+            pmi_map = {}
+        pruned = 0
         for a, b, _cnt in self.store.cooccur_pairs(COOCCUR_THRESHOLD):
             if not self._same_type(a, b):
                 continue
+            # pmi_map 缺失该边（异常或口径不一致）时按放行处理，宁可多建一条边
+            if pmi_map and pmi_map.get((a, b), pmi_map.get((b, a))) is None:
+                pass
+            elif pmi_map and (pmi_map.get((a, b), pmi_map.get((b, a), 0.0)) < COOCCUR_PMI_MIN):
+                pruned += 1
+                continue
             self._link(a, b)
             stats["edges"] += 1
+        stats["pmi_pruned"] = pruned
 
         # 2. 冷知识自动衰减
         stats["cold_decayed"] = self.store.decay_cold(COLD_DECAY_DAYS, COLD_DECAY_FACTOR)

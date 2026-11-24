@@ -75,6 +75,11 @@ def main() -> int:
         result = rebuild_layers(store, embedder, with_vectors=True)
         print(f"[回填] 四层重建: {result} 耗时 {time.time() - t1:.1f}s")
 
+    # 清孤儿向量：条目改稿后旧块 id 消失、以及「微块不算向量」规则生效后的历史残留
+    pruned = store.prune_orphan_chunk_vectors()
+    if pruned:
+        print(f"[回填] 清理孤儿块向量 {pruned} 条")
+
     print(f"[回填] 合计耗时 {time.time() - t0:.1f}s")
     print(f"[回填] 覆盖检查: {store.chunk_stats()} 向量总数={store.count_vectors()}")
     return 0

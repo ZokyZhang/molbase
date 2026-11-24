@@ -118,8 +118,13 @@ class Reranker:
                 # 归一化必须在 try 内完成，避免上层拿到非法值时在 try 外崩掉整个查询
                 sim_n = [max(0.0, min(1.0, float(s))) for s in sims]
             except Exception:
-                sim_n = [max(0.0, min(1.0, h.score)) for h in hits]
+                # 后端推理失败（超时/模型卸载）：语义分一律记 0，让闸门显式弃答。
+                # 历史坑：这里曾回退成 h.score（BM25 原始分，多数 >1），clamp 后恒为 1.0，
+                # 于是 conf = sigmoid(8*(1-0.5)) ≈ 0.98 —— 后端故障时每句噪音都以
+                # 最高置信度放行，且完全静默。「显式不知道」必须优于「假装很确定」。
+                sim_n = [0.0] * len(hits)
         else:
+            # 无 embedder（刻意零模型模式）：用 BM25 做相对排序，量纲归一到 0~1
             sim_n = [max(0.0, min(1.0, h.score)) for h in hits]
         heat_n = _normalize(heats)
         fresh_n = _normalize(freshes)

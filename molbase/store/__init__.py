@@ -1692,6 +1692,22 @@ class Store:
             "path": r[4], "char_start": r[5], "char_end": r[6], "body": r[7],
         }
 
+    def prune_orphan_chunk_vectors(self) -> int:
+        """
+        清掉在 chunks 表里已经找不到对应块的块向量，返回删除行数。
+
+        产生原因：条目正文改动后切块重建，旧 chunk_id 消失但向量行还在；
+        以及「微块不参与块向量」规则生效后，历史上给标题行算过的向量变成孤儿。
+        孤儿向量不会被查到（按 chunk_id 取），但会白占空间、干扰覆盖率统计。
+        """
+        cur = self._conn.cursor()
+        cur.execute(
+            "DELETE FROM vector_index WHERE owner_kind = 'chunk' "
+            "AND owner_id NOT IN (SELECT chunk_id FROM chunks)"
+        )
+        self._conn.commit()
+        return cur.rowcount
+
     def chunk_stats(self) -> dict:
         """切块覆盖统计：{entries_with_chunks, chunks, avg_chunks}，用于观测原文层建成度。"""
         cur = self._conn.cursor()
@@ -1729,7 +1745,10 @@ class Store:
                 key = str(t).strip()
                 if not key:
                     continue
-                key = alias_map.get(key, key)
+                # 必须与 kb_layers.normalize_tag 同口径（别名映射 + 小写）：
+                # 归一化只在写入侧做，读侧（tag_df）直接查表。两边不一致会出现
+                # 「Deploy / deploy / 部署」三个词条，df 被拆散，idf 全失真。
+                key = alias_map.get(key, key).lower()
                 if key in seen:
                     continue
                 seen.add(key)
@@ -1831,25 +1850,38 @@ class Store:
         """
         按 PMI 给共现边重新定权，返回 [(a, b, pmi)] 降序。
 
-        PMI = log( (cnt/N) / ((df_a/N) * (df_b/N)) ) = log( cnt*N / (df_a*df_b) )
-        动机：原始 cnt 会奖励「到处都出现」的高频词对，PMI 惩罚纯高频、奖励真正专属的关联。
-        df 取 tag_vocab 的词频作近似——共现对的两端是标题/标签词，与标签词表同域。
-        数据不足（任一 df 为 0 或 cnt 为 0）时该边记 0 分，不参与治理排序。
+        PMI = log( cnt(a,b) * E / (deg(a) * deg(b)) )，其中
+            deg(x) = 该节点所有边的 cnt 之和，E = 全表 cnt 之和 / 2（总边的"质量"）。
+        动机：原始 cnt 会奖励「到处都出现」的高频节点对，PMI 惩罚纯高频、奖励专属关联。
+
+        为什么用度数而不是 tag_vocab 的 df：本表的端点是 entry_id（kb::xxx / wb::xxx / tg_xxx），
+        不是标签名。早期版本拿 tag_df() 当边际分布，端点查不到 df 就整条丢弃，
+        实测 823 条边一条都留不下（函数恒返回空），等于「PMI 治理」根本没生效。
+        改用本表自身的度数作边际，口径自洽且不依赖外部数据。
         """
         import math
         cur = self._conn.cursor()
         rows = cur.execute("SELECT a, b, cnt FROM cooccur WHERE cnt >= ?", (int(min_count),)).fetchall()
         if not rows:
             return []
-        df = self.tag_df()
-        total = float(max(1, sum(df.values())))
+
+        degree: dict[str, float] = {}
+        total_mass = 0.0
+        for a, b, cnt in rows:
+            w = float(cnt)
+            degree[a] = degree.get(a, 0.0) + w
+            degree[b] = degree.get(b, 0.0) + w
+            total_mass += w
+        # E = 边的总质量的一半（每条边贡献两次），避免除以 0
+        edge_mass = max(1.0, total_mass / 2.0)
+
         out = []
         for a, b, cnt in rows:
-            dfa = float(df.get(a, 0))
-            dfb = float(df.get(b, 0))
-            if dfa <= 0 or dfb <= 0 or not cnt:
+            da = degree.get(a, 0.0)
+            db = degree.get(b, 0.0)
+            if da <= 0 or db <= 0 or not cnt:
                 continue
-            pmi = math.log((float(cnt) * total) / (dfa * dfb))
+            pmi = math.log((float(cnt) * edge_mass) / (da * db))
             if pmi >= min_pmi:
                 out.append((a, b, round(pmi, 4)))
         out.sort(key=lambda x: x[2], reverse=True)

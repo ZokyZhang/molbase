@@ -13,63 +13,40 @@ def model_fingerprint(embedder) -> str:
 
 def semantic_text(title: str, content: str, summary: str = "", max_chars: int = 300) -> str:
     """
-    构造用于向量化的语义文本，总长度不超过 max_chars。
+    构造用于向量化的语义文本，**严格**不超过 max_chars。
 
-    约定：title 与 summary 优先完整保留，只有剩余额度才分配给 content。
+    配额顺序：标题 → 摘要 → 正文，前面用完额度后面就没有。
     默认 300 与 SEMANTIC_SIM_CONTENT_CHARS 对齐——三条调用路径（预计算入库、
     现场精排、预计算重排）必须传同一口径，否则同一对查询-条目会算出不同余弦。
-    """
-    if content is None:
-        content = ""
-    
-    parts = []
-    if title:
-        parts.append(title)
-    if summary:
-        parts.append(summary)
-    if content:
-        parts.append(content)
-    
-    # 计算 title 和 summary 占用的长度（包括换行符）
-    fixed_length = 0
-    if parts:
-        # 构建固定部分：title + "\n" + summary (if exists) + "\n"
-        # 注意：如果只有 title，没有 summary 和 content，则不需要最后的换行
-        # 但为了统一逻辑，我们先构建前缀
-        
-        prefix_parts = []
-        if title:
-            prefix_parts.append(title)
-        if summary:
-            prefix_parts.append(summary)
-            
-        prefix_str = "\n".join(prefix_parts)
-        fixed_length = len(prefix_str)
-        
-        # 如果还有 content，需要预留一个换行符
-        if content:
-            fixed_length += 1 # for the newline before content
 
-    # 计算 content 允许的最大长度
-    available_for_content = max_chars - fixed_length
-    
-    truncated_content = ""
-    if content and available_for_content > 0:
-        if len(content) > available_for_content:
-            truncated_content = content[:available_for_content]
-        else:
-            truncated_content = content
-            
-    # 重新组装
-    final_parts = []
-    if title:
-        final_parts.append(title)
-    if summary:
-        final_parts.append(summary)
-    if truncated_content:
-        final_parts.append(truncated_content)
-        
-    return "\n".join(final_parts)
+    历史坑：早期实现只截 content、不截 summary，导致
+    「qwen-worker 分工约束协议」这类 summary 长达 3135 字的条目
+    实际返回 3181 字（预算 300 的超 10 倍），向量被整篇协议文风主导，
+    成了对任何查询都有中等相似度的吸附点。现在标题/摘要都参与截断。
+    """
+    title = (title or "").strip()
+    summary = (summary or "").strip()
+    content = (content or "").strip()
+    if max_chars <= 0:
+        return ""
+    if not title:
+        # 没有标题时让摘要顶上，避免开头的分隔符浪费额度
+        title = summary
+        summary = ""
+
+    out = title[:max_chars]
+    for seg in (summary, content):
+        if not seg or len(out) >= max_chars:
+            continue
+        room = max_chars - len(out) - 1  # 预留 1 个换行
+        if room <= 0:
+            break
+        piece = seg[:room]
+        out = out + "\n" + piece
+        if len(piece) < len(seg):
+            # 本段已用尽剩余额度，后面的段不再追加
+            break
+    return out[:max_chars]
 
 
 def ensure_entry_vectors(store, embedder, kind: str = "entry", force: bool = False,

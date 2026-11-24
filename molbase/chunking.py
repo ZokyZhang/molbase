@@ -20,13 +20,19 @@ def split_segments(text: str) -> list[tuple]:
     fence = False
     heading_list = []
     
+    fence_marker = ""  # 记录是哪种围栏打开的，避免 ``` 与 ~~~ 混用时提前闭合
     for i, line in enumerate(lines):
         stripped = line.strip()
-        is_fence_toggle = stripped.startswith("```") or stripped.startswith("~~~")
-        
-        if is_fence_toggle:
-            fence = not fence
-        
+        marker = "```" if stripped.startswith("```") else ("~~~" if stripped.startswith("~~~") else "")
+        if marker:
+            if not fence:
+                fence = True
+                fence_marker = marker
+            elif marker == fence_marker:
+                # 只有同种标记才闭合：``` 结束不该被 ~~~~ 误判
+                fence = False
+                fence_marker = ""
+
         in_fence = fence
         
         if not in_fence:
